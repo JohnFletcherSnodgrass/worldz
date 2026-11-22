@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>worldz</title>
+    <meta name="description" content="Click the country you're asked for. World and continent maps, small or big countries, four difficulty levels." />
+    <script>
+      // Set the theme before first paint (same approach as Pebblez).
+      try {
+        if (localStorage.getItem("worldz-theme") === "dark") document.documentElement.classList.add("dark");
+      } catch (e) {}
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+  <body>
+    <main id="stage" data-screen="menu">
+      <svg id="map" role="img" aria-label="World map"></svg>
+
+      <!-- Crosshair cursor with the country to find printed just beneath it -->
+      <div id="cursor" hidden>
+        <svg class="plus" viewBox="-14 -14 28 28" width="28" height="28" aria-hidden="true">
+          <path d="M-11 0H11M0 -11V11" class="halo" />
+          <path d="M-11 0H11M0 -11V11" class="core" />
+        </svg>
+        <div id="pill"></div>
+      </div>
+
+      <header id="hud">
+        <div class="hud-left">
+          <button class="icon-btn" id="btn-menu" title="Back to menu" aria-label="Back to menu">
+            <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" /></svg>
+          </button>
+        </div>
+        <div class="target-card" id="target-card" aria-live="polite">
+          <span class="target-k">Find</span>
+          <span class="target-name" id="target-name"></span>
+          <span class="pips" id="pips" aria-label="Guesses left"></span>
+        </div>
+        <div class="hud-right">
+          <button class="chip-btn" id="btn-skip" title="Skip this country (S)">Skip</button>
+          <button class="icon-btn" id="btn-theme" title="Light / dark" aria-label="Toggle light or dark theme">
+            <svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z" /></svg>
+          </button>
+          <button class="icon-btn" id="btn-fs" title="Full screen (F)" aria-label="Full screen">
+            <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <footer id="hud-bottom">
+        <div class="stats">
+          <span class="stat" title="Found"><i class="dot good"></i><b id="st-ok">0</b></span>
+          <span class="stat" title="Missed"><i class="dot bad"></i><b id="st-miss">0</b></span>
+          <span class="stat" id="st-prog">0 / 0</span>
+          <span class="stat" id="st-time">0:00</span>
+        </div>
+        <div class="zoom-ctl">
+          <span class="hint">Scroll to zoom · drag to pan</span>
+          <button class="icon-btn sm" id="z-in" aria-label="Zoom in">+</button>
+          <button class="icon-btn sm" id="z-out" aria-label="Zoom out">−</button>
+          <button class="icon-btn sm" id="z-reset" aria-label="Reset zoom" title="Reset zoom">⟲</button>
+        </div>
+      </footer>
+
+      <!-- Menu -->
+      <section id="menu" class="overlay">
+        <div class="panel">
+          <div class="hero">
+            <h1>worldz</h1>
+            <p class="hand">find the country, click it.</p>
+            <div class="hero-tools">
+              <button class="icon-btn on-hero" id="m-theme" aria-label="Toggle light or dark theme">
+                <svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z" /></svg>
+              </button>
+              <button class="icon-btn on-hero" id="m-fs" aria-label="Full screen" title="Full screen (F)">
+                <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="section">
+            <h2>Map</h2>
+            <div class="grid modes" id="mode-grid"></div>
+          </div>
+
+          <div class="section">
+            <h2>Countries <small id="size-note"></small></h2>
+            <div class="seg" id="size-seg" role="radiogroup"></div>
+          </div>
+
+          <div class="section">
+            <h2>Difficulty</h2>
+            <div class="grid levels" id="level-grid"></div>
+          </div>
+
+          <button class="go" id="btn-start">Start <span id="start-count"></span></button>
+        </div>
+      </section>
+
+      <!-- End of round -->
+      <section id="end" class="overlay" hidden>
+        <div class="panel end-panel">
+          <div class="hero">
+            <p class="hand" id="end-hand">nice one</p>
+            <h1 id="end-score"></h1>
+            <p class="end-sub" id="end-sub"></p>
+          </div>
+          <div class="end-stats" id="end-stats"></div>
+          <div class="section" id="end-missed-wrap">
+            <h2>Missed</h2>
+            <div class="chips" id="end-missed"></div>
+          </div>
+          <div class="end-actions">
+            <button class="go" id="e-again">Play again</button>
+            <button class="ghost" id="e-map">View map</button>
+            <button class="ghost" id="e-menu">Menu</button>
+          </div>
+        </div>
+      </section>
+
+      <button id="btn-results" class="chip-btn floating" hidden>Back to results</button>
+    </main>
+
+    <script src="vendor/d3.min.js"></script>
+    <script src="data/world-data.js"></script>
+    <script src="js/app.js"></script>
+  </body>
+</html>
