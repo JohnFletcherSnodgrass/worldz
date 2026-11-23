@@ -184,7 +184,8 @@
   warmHd.gen = 0;
   // While you're zooming or dragging, the lighter 1:50m outlines are drawn; the detailed ones
   // come in once the map stops moving.
-  let moving = false;
+  let moving = false,
+    settleTimer = 0;
   // The outline to draw or hit-test for a country at zoom k.
   function pathFor(it, k) {
     if (k < LO_K) return it.lo;
@@ -420,16 +421,18 @@
       ])
       .clickDistance(4)
       .filter((ev) => !ev.button && ev.type !== "dblclick")
-      .on("start", () => {
-        moving = true;
-      })
       .on("zoom", (ev) => {
         transform = ev.transform;
-        request(true);
-      })
-      .on("end", () => {
-        moving = false;
-        request(true);
+        if (ev.sourceEvent) {
+          // Your own drag / scroll / pinch: slide the last drawing (cheap), redraw once you pause.
+          moving = true;
+          clearTimeout(settleTimer);
+          settleTimer = setTimeout(() => {
+            moving = false;
+            request(true);
+          }, 140);
+          request(false);
+        } else request(true); // fly-to and button zooms animate with real redraws
       });
     const sel = d3.select(topCv);
     sel.on(".zoom", null);
@@ -462,6 +465,7 @@
       ptrDirty = false;
       moveCursor();
     }
+    if (!dirtyBase && moving && !slideBase()) dirtyBase = true;
     if (dirtyBase) {
       dirtyBase = false;
       drawBase();
@@ -478,8 +482,25 @@
     return x1 > -pad && x0 < W + pad && y1 > -pad && y0 < H + pad;
   };
 
+  // While the map moves under your fingers the base canvas isn't redrawn: its last picture is
+  // moved with a CSS transform, which the GPU does almost for free. Returns false when too much
+  // of the screen would be left uncovered, so a real redraw is needed.
+  let drawnAt = d3.zoomIdentity;
+  function slideBase() {
+    const s = transform.k / drawnAt.k;
+    const tx = transform.x - s * drawnAt.x,
+      ty = transform.y - s * drawnAt.y;
+    const ox = Math.max(0, Math.min(W, tx + s * W) - Math.max(0, tx)),
+      oy = Math.max(0, Math.min(H, ty + s * H) - Math.max(0, ty));
+    if ((ox * oy) / (W * H) < 0.7 || s > 4) return false;
+    baseCv.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
+    return true;
+  }
+
   function drawBase() {
     const k = transform.k;
+    drawnAt = transform;
+    baseCv.style.transform = "";
     bctx.setTransform(1, 0, 0, 1, 0, 0);
     bctx.clearRect(0, 0, baseCv.width, baseCv.height);
     bctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * transform.x, dpr * transform.y);

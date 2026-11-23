@@ -134,6 +134,10 @@ html:-webkit-full-screen #stage {
   height: 100%;
   display: block;
 }
+#base {
+  transform-origin: 0 0;
+  will-change: transform;
+}
 #stage[data-screen="menu"] #base,
 #stage[data-screen="menu"] #top {
   opacity: 0.55;
