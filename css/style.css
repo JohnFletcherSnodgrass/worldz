@@ -55,11 +55,11 @@
   --shadow-card: 0 1px 0 rgb(0 0 0 / 30%), 0 16px 32px -20px rgb(0 0 0 / 70%);
   --shadow-hero: 0 22px 40px -22px rgb(255 94 58 / 45%);
 
-  --ocean: #121211;
-  --land: #232220;
-  --land-hover: #2e2d2a;
-  --land-ctx: #1a1a18;
-  --land-stroke: #121211;
+  --ocean: #1f1e1c;
+  --land: #3d3c37;
+  --land-hover: #4d4b44;
+  --land-ctx: #2c2b28;
+  --land-stroke: #1f1e1c;
   --yooper-1: #ffa621;
   --yooper-2: #de7512;
   --yooper-3: #8f4409;
