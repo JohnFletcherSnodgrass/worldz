@@ -2,7 +2,7 @@
 
 A country guessing game. You're given a country, you click it on the map.
 
-Same look as [Pebblez](https://github.com/JohnFletcherSnodgrass/pebblez): coral, sun yellow, navy ink, Caveat handwriting. Night mode is the default (near-black map, orange country outlines); light mode is one tap away.
+Same look as [Pebblez](https://github.com/JohnFletcherSnodgrass/pebblez): coral, sun yellow, navy ink, Caveat handwriting. Night mode is the default (dark map); light mode is one tap away.
 
 ## Play
 
