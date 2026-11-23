@@ -48,11 +48,11 @@
   const pillEl = $("#pill");
 
   // ---------- settings (remembered, but the app works without storage) ----------
-  const DEFAULTS = { mode: "world", size: "all", level: "easy" };
+  const DEFAULTS = { mode: "world", size: "all", level: "easy", dots: true };
   let settings = { ...DEFAULTS };
   try {
     const saved = JSON.parse(localStorage.getItem("worldz-settings") || "null");
-    if (saved && MODES.some((m) => m.id === saved.mode) && SIZES.some((s) => s.id === saved.size) && LEVELS.some((l) => l.id === saved.level)) settings = saved;
+    if (saved && MODES.some((m) => m.id === saved.mode) && SIZES.some((s) => s.id === saved.size) && LEVELS.some((l) => l.id === saved.level)) settings = { ...DEFAULTS, ...saved, dots: saved.dots !== false };
   } catch (e) {}
   const saveSettings = () => {
     try {
@@ -371,7 +371,8 @@
     }
   }
 
-  const isDot = (it, k) => it.dotCapable && (!it.hi || it.size * k < DOT_PX);
+  // Countries with no outline at all (Tuvalu) are always a dot; others only when dots are switched on.
+  const isDot = (it, k) => it.dotCapable && (!it.hi || (settings.dots && it.size * k < DOT_PX));
 
   function drawTop(now) {
     const k = transform.k;
@@ -871,6 +872,22 @@
     if (screen === "play" && !game.busy) miss(true);
   };
 
+  // dots for small countries
+  function renderDots() {
+    $("#btn-dots").setAttribute("aria-pressed", String(settings.dots));
+    $("#m-dots").setAttribute("aria-checked", String(settings.dots));
+  }
+  function toggleDots() {
+    settings.dots = !settings.dots;
+    saveSettings();
+    renderDots();
+    hover = null;
+    request(true);
+  }
+  $("#btn-dots").onclick = toggleDots;
+  $("#m-dots").onclick = toggleDots;
+  renderDots();
+
   // theme
   function toggleTheme() {
     const dark = document.documentElement.classList.toggle("dark");
@@ -904,6 +921,7 @@
     if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
     if (ev.key === "f" || ev.key === "F") toggleFs();
     else if ((ev.key === "s" || ev.key === "S") && screen === "play" && !game.busy) miss(true);
+    else if (ev.key === "d" || ev.key === "D") toggleDots();
   });
 
   // re-fit the map when the window (or full screen) changes size

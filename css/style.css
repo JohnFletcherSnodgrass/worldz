@@ -266,6 +266,19 @@ html:-webkit-full-screen #stage {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+#btn-dots svg circle {
+  fill: currentColor;
+  stroke: none;
+}
+#btn-dots .slash {
+  display: none;
+}
+#btn-dots[aria-pressed="false"] {
+  color: var(--muted-foreground);
+}
+#btn-dots[aria-pressed="false"] .slash {
+  display: inline;
+}
 .icon-btn.sm {
   width: 32px;
   height: 32px;
@@ -508,6 +521,64 @@ html:-webkit-full-screen #stage {
 .seg button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--background);
+  text-align: left;
+}
+.switch-row span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.switch-row b {
+  font-size: 14px;
+}
+.switch-row small {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.switch {
+  flex: none;
+  position: relative;
+  width: 40px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--input);
+  transition: background 0.15s;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+.switch-row[aria-checked="true"] .switch {
+  background: var(--coral);
+}
+.switch-row[aria-checked="true"] .switch::after {
+  transform: translateX(16px);
+}
+.switch-row:focus-visible,
+.icon-btn:focus-visible,
+.chip-btn:focus-visible {
+  outline: 2px solid var(--coral);
+  outline-offset: 2px;
 }
 .go {
   display: block;

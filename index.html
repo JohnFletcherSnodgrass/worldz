@@ -41,6 +41,9 @@
         </div>
         <div class="hud-right">
           <button class="chip-btn" id="btn-skip" title="Skip this country (S)">Skip</button>
+          <button class="icon-btn" id="btn-dots" aria-pressed="true" title="Dots for small countries (D)" aria-label="Dots for small countries">
+            <svg viewBox="0 0 24 24"><circle cx="6" cy="12" r="2.2" /><circle cx="12" cy="7" r="2.2" /><circle cx="17" cy="15" r="2.2" /><path class="slash" d="M4 20L20 4" /></svg>
+          </button>
           <button class="icon-btn" id="btn-theme" title="Light / dark" aria-label="Toggle light or dark theme">
             <svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z" /></svg>
           </button>
@@ -89,6 +92,10 @@
           <div class="section">
             <h2>Countries <small id="size-note"></small></h2>
             <div class="seg" id="size-seg" role="radiogroup"></div>
+            <button class="switch-row" id="m-dots" role="switch" aria-checked="true">
+              <span><b>Dots for small countries</b><small>Tiny countries show as a dot you can click until you zoom in</small></span>
+              <i class="switch" aria-hidden="true"></i>
+            </button>
           </div>
 
           <div class="section">
