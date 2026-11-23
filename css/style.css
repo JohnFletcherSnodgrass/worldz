@@ -29,7 +29,7 @@
   --land: #d3cebf;
   --land-hover: #c4bfae;
   --land-ctx: #e5e1d6;
-  --land-stroke: #ff5e3a;
+  --land-stroke: #f6f4ef;
   /* yooperlite: glowing orange when you get it first try, darker the more guesses it took */
   --yooper-1: #ff9f1c;
   --yooper-2: #dd7010;
@@ -55,11 +55,11 @@
   --shadow-card: 0 1px 0 rgb(0 0 0 / 30%), 0 16px 32px -20px rgb(0 0 0 / 70%);
   --shadow-hero: 0 22px 40px -22px rgb(255 94 58 / 45%);
 
-  --ocean: #050505;
+  --ocean: #121211;
   --land: #232220;
   --land-hover: #2e2d2a;
-  --land-ctx: #141413;
-  --land-stroke: #ff5e3a;
+  --land-ctx: #1a1a18;
+  --land-stroke: #121211;
   --yooper-1: #ffa621;
   --yooper-2: #de7512;
   --yooper-3: #8f4409;
