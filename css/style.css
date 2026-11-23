@@ -25,17 +25,21 @@
   --shadow-card: 0 1px 0 rgb(0 0 0 / 4%), 0 16px 32px -20px rgb(26 31 43 / 40%);
   --shadow-hero: 0 22px 40px -22px rgb(255 94 58 / 70%);
 
-  --ocean: #f6f4ef;
-  --land: #d3cebf;
-  --land-hover: #c4bfae;
-  --land-ctx: #e5e1d6;
-  --land-stroke: #f6f4ef;
+  /* map: pale sea, four warm land shades so neighbours read apart, borders as gaps in a sea tone */
+  --ocean: #cfdde2;
+  --land: #f3efe4;
+  --land-2: #ebe5d6;
+  --land-3: #e2dbc8;
+  --land-4: #f8f5ee;
+  --land-hover: #d8d0bb;
+  --land-ctx: #dcd8cd;
+  --land-stroke: #a9bcc3;
   /* right answers: green, darker the more guesses it took */
   --good-1: #2e9e72;
   --good-2: #22785a;
   --good-3: #175640;
   --bad: #d13a30;
-  --hover-tint: rgb(26 31 43 / 11%);
+  --hover-tint: rgb(26 31 43 / 14%);
   --cursor-core: #1a1f2b;
   --cursor-halo: #fffefb;
   --dot: #7d7a6c;
@@ -55,16 +59,19 @@
   --shadow-card: 0 1px 0 rgb(0 0 0 / 30%), 0 16px 32px -20px rgb(0 0 0 / 70%);
   --shadow-hero: 0 22px 40px -22px rgb(255 94 58 / 45%);
 
-  --ocean: #1f1e1c;
-  --land: #3d3c37;
-  --land-hover: #4d4b44;
-  --land-ctx: #2c2b28;
-  --land-stroke: #1f1e1c;
+  --ocean: #121722;
+  --land: #565349;
+  --land-2: #4d4a41;
+  --land-3: #605d52;
+  --land-4: #47443c;
+  --land-hover: #6b675b;
+  --land-ctx: #37352f;
+  --land-stroke: #121722;
   --good-1: #4fb383;
   --good-2: #398d66;
   --good-3: #266a4b;
   --bad: #e5534b;
-  --hover-tint: rgb(255 255 255 / 11%);
+  --hover-tint: rgb(255 255 255 / 16%);
   --cursor-core: #ede9e0;
   --cursor-halo: #191817;
   --dot: #a8a291;

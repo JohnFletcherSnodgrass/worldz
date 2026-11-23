@@ -14,6 +14,7 @@
   const SMALL_KM2 = 100000; // "small" = under 100,000 km²
   const DOT_PX = 10; // countries drawn smaller than this on screen become clickable dots
   const LO_K = 2.5; // below this zoom the simplified outlines are used
+  const HD_K = 4; // from this zoom on, the detailed 1:10m outlines are used (once they have loaded)
   const FONT = '"Helvetica Neue", Helvetica, Arial, sans-serif';
 
   const MODES = [
@@ -115,6 +116,67 @@
   const TINTS = ["#ff5e3a", "#4e6bff", "#2e9e72", "#e2b100", "#7a5cff", "#14a3b8", "#d6447f", "#b0492e", "#8fbf3a", "#c77dff"];
   const regionTint = new Map([...new Set(D.countries.map((c) => c.subregion))].sort().map((r, i) => [r, TINTS[i % TINTS.length]]));
 
+  // Four soft shades of land, spread so countries that share a border get different ones
+  // (greedy colouring over the real border list). Same for everyone, so it gives nothing away.
+  const shadeOf = new Map();
+  for (const c of [...D.countries].sort((a, b) => (b.neighbors || []).length - (a.neighbors || []).length)) {
+    const taken = new Set((c.neighbors || []).map((n) => shadeOf.get(n)));
+    let i = 0;
+    while (taken.has(i) && i < 3) i++;
+    shadeOf.set(c.id, i);
+  }
+
+  // ---------- detailed outlines (data/world-hi.js, ~1 MB gzipped), fetched in the background ----------
+  let HD = null;
+  function loadScript(src) {
+    return new Promise((ok, fail) => {
+      const el = document.createElement("script");
+      el.src = src;
+      el.onload = ok;
+      el.onerror = fail;
+      document.head.appendChild(el);
+    });
+  }
+  function loadHd() {
+    if (loadHd.started) return;
+    loadHd.started = true;
+    Promise.all([window.topojson ? null : loadScript("vendor/topojson-client.min.js"), loadScript("data/world-hi.js")])
+      .then(() => {
+        const h = window.WORLDZ_HI;
+        const geoms = h.topo.objects.countries.geometries;
+        const geomOf = (idx) => (idx.length > 1 ? topojson.merge(h.topo, idx.map((i) => geoms[i])) : topojson.feature(h.topo, geoms[idx[0]]).geometry);
+        HD = { countries: h.countries, context: h.context, geomOf };
+        request(true);
+      })
+      .catch(() => {}); // no detailed outlines: the 1:50m ones carry on
+  }
+  // The outline to draw or hit-test for a country at zoom k.
+  function pathFor(it, k) {
+    if (k < LO_K) return it.lo;
+    if (k >= HD_K && HD) {
+      if (it.hd === undefined) {
+        const idx = HD.countries[it.c.id];
+        it.hd = idx ? new Path2D(hdPath({ type: "Feature", geometry: HD.geomOf(idx) }) || "") : null;
+      }
+      if (it.hd) return it.hd;
+    }
+    return it.hi;
+  }
+  let hdCtx = null;
+  function hdContext() {
+    if (!hdCtx) {
+      hdCtx = [];
+      for (const i of HD.context) {
+        const feat = { type: "Feature", geometry: HD.geomOf([i]) };
+        const str = hdPath(feat);
+        if (!str) continue;
+        const bb = d3.geoPath(proj).bounds(feat);
+        hdCtx.push({ hd: new Path2D(str), bb: [bb[0][0], bb[0][1], bb[1][0], bb[1][1]] });
+      }
+    }
+    return hdCtx;
+  }
+
   // ---------- colours (read from the CSS tokens so light/dark and the Pebblez palette stay in one place) ----------
   let colors = {};
   function readColors() {
@@ -122,6 +184,7 @@
     const g = (n) => cs.getPropertyValue(n).trim();
     colors = {
       land: g("--land"),
+      shades: [g("--land"), g("--land-2"), g("--land-3"), g("--land-4")],
       ctx: g("--land-ctx"),
       stroke: g("--land-stroke"),
       ocean: g("--ocean"),
@@ -145,6 +208,7 @@
     H = 0,
     dpr = 1,
     proj = null,
+    hdPath = null,
     transform = d3.zoomIdentity,
     zoomBehavior = null;
   let items = new Map(); // country id -> item
@@ -247,6 +311,8 @@
       outline,
     );
     const hiPath = d3.geoPath(proj).digits(2);
+    hdPath = d3.geoPath(proj).digits(3);
+    hdCtx = null;
     const loPath = lowRes(proj, 0.5);
     const bounds = d3.geoPath(proj);
     // You start locked on the chosen map, but can zoom out and pan over the whole world.
@@ -275,7 +341,7 @@
 
     for (const c of D.countries) {
       const g = c.geometry;
-      const it = { c, hi: null, lo: null, bb: null, ax: 0, ay: 0, size: 0, lw: 0, pool: pool.has(c.id), dotCapable: false, shown: null, labelOn: false, flash: null, pulse: null, tmp: null, shake: null };
+      const it = { c, hi: null, lo: null, bb: null, ax: 0, ay: 0, size: 0, lw: 0, hd: undefined, pool: pool.has(c.id), dotCapable: false, shown: null, labelOn: false, flash: null, pulse: null, tmp: null, shake: null };
       let ok = false;
       if (g) {
         const feat = { type: "Feature", geometry: g };
@@ -377,21 +443,22 @@
     bctx.clearRect(0, 0, baseCv.width, baseCv.height);
     bctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * transform.x, dpr * transform.y);
     bctx.lineJoin = "round";
-    bctx.lineWidth = 0.8 / k; // constant on-screen thickness
+    bctx.lineWidth = 1.1 / k; // constant on-screen thickness
     bctx.strokeStyle = colors.stroke;
     const lo = k < LO_K;
+    const hd = k >= HD_K && HD;
     const tints = hint("tints");
-    for (const sh of ctxShapes) {
+    for (const sh of hd ? hdContext() : ctxShapes) {
       if (!onScreen(sh.bb, k, 2)) continue;
-      const p = lo ? sh.lo : sh.hi;
-      bctx.fillStyle = colors.land;
+      const p = hd ? sh.hd : lo ? sh.lo : sh.hi;
+      bctx.fillStyle = colors.ctx;
       bctx.fill(p, "evenodd");
       bctx.stroke(p);
     }
     for (const it of items.values()) {
       if (!it.hi || !onScreen(it.bb, k, 2)) continue;
-      const p = lo ? it.lo : it.hi;
-      bctx.fillStyle = it.shown ? resultColor(it.shown) : colors.land; // every country the same colour until answered
+      const p = pathFor(it, k);
+      bctx.fillStyle = it.shown ? resultColor(it.shown) : colors.shades[shadeOf.get(it.c.id)];
       bctx.fill(p, "evenodd");
       if (tints && !it.shown) {
         bctx.globalAlpha = colors.dark ? 0.07 : 0.08;
@@ -416,7 +483,7 @@
     tctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * transform.x, dpr * transform.y);
     if (hover && screen === "play" && hover.hi && !hover.shown) {
       tctx.fillStyle = colors.tint;
-      tctx.fill(k < LO_K ? hover.lo : hover.hi, "evenodd");
+      tctx.fill(pathFor(hover, k), "evenodd");
     }
     // neighbour outline on the last guess
     if (hint("neighbours") && screen === "play" && game && !game.busy && game.tries > 1 && game.left === 1 && game.i < game.queue.length) {
@@ -426,7 +493,7 @@
       for (const nid of t.c.neighbors) {
         const n = items.get(nid);
         if (!n || !n.hi) continue;
-        const p = k < LO_K ? n.lo : n.hi;
+        const p = pathFor(n, k);
         tctx.fillStyle = "rgb(255 94 58 / 16%)";
         tctx.fill(p, "evenodd");
         tctx.strokeStyle = colors.coral;
@@ -447,7 +514,7 @@
           tctx.shadowColor = "rgb(0 0 0 / 35%)";
           tctx.shadowBlur = 10;
           tctx.fillStyle = it.pop.color;
-          tctx.fill(k < LO_K ? it.lo : it.hi, "evenodd");
+          tctx.fill(pathFor(it, k), "evenodd");
           tctx.restore();
         } else anim = true;
       }
@@ -459,7 +526,7 @@
           if (it.hi) {
             tctx.globalAlpha = Math.min(1, a * 1.1);
             tctx.fillStyle = it.flash.color;
-            tctx.fill(k < LO_K ? it.lo : it.hi, "evenodd");
+            tctx.fill(pathFor(it, k), "evenodd");
           }
         }
       }
@@ -471,7 +538,7 @@
           if (it.hi) {
             tctx.globalAlpha = 0.25 + 0.75 * Math.abs(Math.sin((e / 550) * Math.PI));
             tctx.fillStyle = colors.accent;
-            tctx.fill(k < LO_K ? it.lo : it.hi, "evenodd");
+            tctx.fill(pathFor(it, k), "evenodd");
           }
         }
       }
@@ -688,7 +755,7 @@
       if (!it.hi) continue;
       const b = it.bb;
       if (mx < b[0] || mx > b[2] || my < b[1] || my > b[3]) continue;
-      if (hitCtx.isPointInPath(it.hi, mx, my, "evenodd")) return it;
+      if (hitCtx.isPointInPath(pathFor(it, k), mx, my, "evenodd")) return it;
     }
     // Nothing exactly under the pointer: allow a few pixels of slack so thin or tiny
     // countries (Gambia, Sao Tome ...) can still be clicked.
@@ -700,7 +767,7 @@
       if (!it.hi) continue;
       const b = it.bb;
       if (mx < b[0] - slack || mx > b[2] + slack || my < b[1] - slack || my > b[3] + slack) continue;
-      if (it.size < nearSize && hitCtx.isPointInStroke(it.hi, mx, my)) {
+      if (it.size < nearSize && hitCtx.isPointInStroke(pathFor(it, k), mx, my)) {
         near = it;
         nearSize = it.size;
       }
@@ -733,6 +800,7 @@
 
   // ids: play just these countries (practice); otherwise the whole map
   function startGame(ids) {
+    loadHd();
     const pool = ids || poolFor(settings.mode, settings.size).map((c) => c.id);
     if (!pool.length) return;
     const level = levelOf(settings.level);
