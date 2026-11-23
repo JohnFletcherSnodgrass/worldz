@@ -144,20 +144,52 @@
       .then(() => {
         const h = window.WORLDZ_HI;
         const geoms = h.topo.objects.countries.geometries;
-        const geomOf = (idx) => (idx.length > 1 ? topojson.merge(h.topo, idx.map((i) => geoms[i])) : topojson.feature(h.topo, geoms[idx[0]]).geometry);
+        const geomOf = (idx) => fixWinding(idx.length > 1 ? topojson.merge(h.topo, idx.map((i) => geoms[i])) : topojson.feature(h.topo, geoms[idx[0]]).geometry);
         HD = { countries: h.countries, context: h.context, geomOf };
+        warmHd();
         request(true);
       })
       .catch(() => {}); // no detailed outlines: the 1:50m ones carry on
   }
+  // d3 reads a polygon wound the wrong way as "the whole globe except this shape"; a few
+  // 1:10m pieces (in the Maldives) come out like that, which painted the whole sea grey.
+  function fixWinding(g) {
+    if (!g) return g;
+    const polys = g.type === "Polygon" ? [g.coordinates] : g.coordinates;
+    for (const p of polys) if (d3.geoArea({ type: "Polygon", coordinates: p }) > 2 * Math.PI) p.forEach((ring) => ring.reverse());
+    return g;
+  }
+  function buildHd(it) {
+    const idx = HD.countries[it.c.id];
+    it.hd = idx ? new Path2D(hdPath({ type: "Feature", geometry: HD.geomOf(idx) }) || "") : null;
+  }
+  // Build the detailed outlines a few at a time while the browser is idle, so zooming in
+  // never stalls on them.
+  function warmHd() {
+    if (!HD || !proj) return;
+    const gen = ++warmHd.gen;
+    const todo = [...items.values()].filter((it) => it.hi && it.hd === undefined);
+    const idle = window.requestIdleCallback || ((f) => setTimeout(() => f({ timeRemaining: () => 8 }), 16));
+    const step = (dl) => {
+      if (gen !== warmHd.gen) return; // the map was rebuilt
+      while (todo.length && dl.timeRemaining() > 2) {
+        const it = todo.pop();
+        if (it.hd === undefined) buildHd(it);
+      }
+      if (todo.length) idle(step);
+      else if (transform.k >= HD_K) request(true);
+    };
+    idle(step);
+  }
+  warmHd.gen = 0;
+  // While you're zooming or dragging, the lighter 1:50m outlines are drawn; the detailed ones
+  // come in once the map stops moving.
+  let moving = false;
   // The outline to draw or hit-test for a country at zoom k.
   function pathFor(it, k) {
     if (k < LO_K) return it.lo;
-    if (k >= HD_K && HD) {
-      if (it.hd === undefined) {
-        const idx = HD.countries[it.c.id];
-        it.hd = idx ? new Path2D(hdPath({ type: "Feature", geometry: HD.geomOf(idx) }) || "") : null;
-      }
+    if (k >= HD_K && HD && !moving) {
+      if (it.hd === undefined) buildHd(it);
       if (it.hd) return it.hd;
     }
     return it.hi;
@@ -388,8 +420,15 @@
       ])
       .clickDistance(4)
       .filter((ev) => !ev.button && ev.type !== "dblclick")
+      .on("start", () => {
+        moving = true;
+      })
       .on("zoom", (ev) => {
         transform = ev.transform;
+        request(true);
+      })
+      .on("end", () => {
+        moving = false;
         request(true);
       });
     const sel = d3.select(topCv);
@@ -399,6 +438,8 @@
     // d3 centres the map when it's smaller than the window; apply that starting position.
     sel.call(zoomBehavior.transform, d3.zoomIdentity);
     applyState();
+    moving = false;
+    warmHd();
   }
 
   // ---------- drawing ----------
@@ -446,7 +487,7 @@
     bctx.lineWidth = 1.1 / k; // constant on-screen thickness
     bctx.strokeStyle = colors.stroke;
     const lo = k < LO_K;
-    const hd = k >= HD_K && HD;
+    const hd = k >= HD_K && HD && !moving;
     const tints = hint("tints");
     for (const sh of hd ? hdContext() : ctxShapes) {
       if (!onScreen(sh.bb, k, 2)) continue;
