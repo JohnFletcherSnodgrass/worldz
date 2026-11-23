@@ -127,6 +127,7 @@ html:-webkit-full-screen #stage {
 
 /* ---------- Map (two stacked canvases: the map, then highlights/dots/labels) ---------- */
 #base,
+#base-gl,
 #top {
   position: absolute;
   inset: 0;
@@ -139,6 +140,7 @@ html:-webkit-full-screen #stage {
   will-change: transform;
 }
 #stage[data-screen="menu"] #base,
+#stage[data-screen="menu"] #base-gl,
 #stage[data-screen="menu"] #top {
   opacity: 0.55;
 }

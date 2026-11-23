@@ -147,6 +147,7 @@
         const geomOf = (idx) => fixWinding(idx.length > 1 ? topojson.merge(h.topo, idx.map((i) => geoms[i])) : topojson.feature(h.topo, geoms[idx[0]]).geometry);
         HD = { countries: h.countries, context: h.context, geomOf };
         warmHd();
+        glBuildHd();
         request(true);
       })
       .catch(() => {}); // no detailed outlines: the 1:50m ones carry on
@@ -166,7 +167,7 @@
   // Build the detailed outlines a few at a time while the browser is idle, so zooming in
   // never stalls on them.
   function warmHd() {
-    if (!HD || !proj) return;
+    if (!HD || !proj || gl) return; // the WebGL map builds its own; outlines for clicks are made when needed
     const gen = ++warmHd.gen;
     const todo = [...items.values()].filter((it) => it.hi && it.hd === undefined);
     const idle = window.requestIdleCallback || ((f) => setTimeout(() => f({ timeRemaining: () => 8 }), 16));
@@ -293,7 +294,8 @@
   let dprCap = Math.min(2, window.devicePixelRatio || 1);
   function sizeCanvases() {
     dpr = dprCap;
-    for (const c of [baseCv, topCv]) {
+    for (const c of [baseCv, topCv, glCv]) {
+      if (!c) continue;
       c.width = Math.round(W * dpr);
       c.height = Math.round(H * dpr);
     }
@@ -369,7 +371,10 @@
     // Territories and non-country shapes: context only.
     for (const x of D.context) {
       const sh = mkShape({ type: "Feature", geometry: x.geometry });
-      if (sh) ctxShapes.push(sh);
+      if (sh) {
+        sh.geom = x.geometry;
+        ctxShapes.push(sh);
+      }
     }
 
     for (const c of D.countries) {
@@ -431,7 +436,7 @@
             moving = false;
             request(true);
           }, 140);
-          request(false);
+          request(!!gl); // WebGL redraws every frame; the 2D canvas slides its last picture
         } else request(true); // fly-to and button zooms animate with real redraws
       });
     const sel = d3.select(topCv);
@@ -440,9 +445,10 @@
     transform = d3.zoomIdentity;
     // d3 centres the map when it's smaller than the window; apply that starting position.
     sel.call(zoomBehavior.transform, d3.zoomIdentity);
-    applyState();
     moving = false;
+    glBuildMd();
     warmHd();
+    applyState();
   }
 
   // ---------- drawing ----------
@@ -465,7 +471,7 @@
       ptrDirty = false;
       moveCursor();
     }
-    if (!dirtyBase && moving && !slideBase()) dirtyBase = true;
+    if (!gl && !dirtyBase && moving && !slideBase()) dirtyBase = true;
     if (dirtyBase) {
       dirtyBase = false;
       drawBase();
@@ -482,7 +488,295 @@
     return x1 > -pad && x0 < W + pad && y1 > -pad && y0 < H + pad;
   };
 
-  // While the map moves under your fingers the base canvas isn't redrawn: its last picture is
+  // ---------- WebGL map ----------
+  // The map is drawn on the graphics card: every outline is turned into triangles once, and
+  // zooming or panning only changes two numbers in the shader, so it stays smooth at any zoom,
+  // with nothing left to "fill in" afterwards. Countries are filled with the stencil trick
+  // (fan triangles flip a stencil bit, then a box is painted where the bit is set), which gives
+  // the same even-odd result as the 2D canvas without a triangulation library. Borders are thin
+  // quads, one per outline segment, drawn in a single instanced call.
+  // Without WebGL2 the 2D canvas renderer below carries on as before.
+  let gl = null,
+    glCv = null;
+  let glMd = null, // 1:50m geometry for the current projection
+    glHd = null; // 1:10m, built in idle time once world-hi.js has loaded
+  const GL_FILL_VS = `#version 300 es
+    in vec2 p; uniform vec3 xf; uniform vec2 res;
+    void main() { vec2 s = p * xf.x + xf.yz; gl_Position = vec4(s / res * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0); }`;
+  const GL_LINE_VS = `#version 300 es
+    in vec4 seg; in vec2 corner; uniform vec3 xf; uniform vec2 res; uniform float hw;
+    void main() {
+      vec2 a = seg.xy * xf.x + xf.yz, b = seg.zw * xf.x + xf.yz, d = b - a;
+      float l = length(d);
+      vec2 u = l > 0.0 ? d / l : vec2(1.0, 0.0), n = vec2(-u.y, u.x);
+      vec2 s = mix(a, b, corner.x) + n * corner.y * hw + u * (corner.x * 2.0 - 1.0) * hw;
+      gl_Position = vec4(s / res * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0);
+    }`;
+  const GL_FS = `#version 300 es
+    precision mediump float; uniform vec4 color; out vec4 o;
+    void main() { o = color; }`;
+  let glFill = null,
+    glLine = null,
+    glCorner = null;
+
+  function glProgram(vs, fs) {
+    const mk = (type, src) => {
+      const sh = gl.createShader(type);
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+      return sh;
+    };
+    const pr = gl.createProgram();
+    gl.attachShader(pr, mk(gl.VERTEX_SHADER, vs));
+    gl.attachShader(pr, mk(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+    const u = (n) => gl.getUniformLocation(pr, n);
+    return { pr, xf: u("xf"), res: u("res"), color: u("color"), hw: u("hw") };
+  }
+
+  function initGL() {
+    try {
+      glCv = document.createElement("canvas");
+      glCv.id = "base-gl";
+      glCv.setAttribute("aria-hidden", "true");
+      gl = glCv.getContext("webgl2", { antialias: true, stencil: true, alpha: true, premultipliedAlpha: true, preserveDrawingBuffer: false });
+      if (!gl) throw new Error("no webgl2");
+      // Software WebGL (no usable graphics card) is slower than the 2D canvas: use that instead.
+      const info = gl.getExtension("WEBGL_debug_renderer_info");
+      const renderer = info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : "";
+      if (/swiftshader|llvmpipe|software|basic render/i.test(renderer)) throw new Error("software webgl");
+      glFill = glProgram(GL_FILL_VS, GL_FS);
+      glLine = glProgram(GL_LINE_VS, GL_FS);
+      glCorner = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, glCorner);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, -1, 0, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
+      baseCv.parentNode.insertBefore(glCv, baseCv);
+      baseCv.style.display = "none";
+      glCv.addEventListener("webglcontextlost", (e) => {
+        // fall back to the 2D canvas for the rest of the session
+        e.preventDefault();
+        gl = null;
+        glCv.remove();
+        baseCv.style.display = "";
+        request(true);
+      });
+    } catch (e) {
+      gl = null;
+      glCv = null;
+    }
+  }
+
+  // Projected outline rings (in map pixels at zoom 1) for one geometry.
+  function ringsOf(geometry) {
+    const rings = [];
+    let cur = null;
+    const sink = {
+      moveTo(x, y) {
+        cur = [x, y];
+        rings.push(cur);
+      },
+      lineTo(x, y) {
+        cur.push(x, y);
+      },
+      closePath() {},
+      arc() {},
+      rect() {},
+    };
+    d3.geoPath(proj, sink)({ type: "Feature", geometry });
+    return rings;
+  }
+
+  // Collects shapes into one triangle buffer (fans + cover boxes) and one segment buffer.
+  function glBuilder() {
+    const tri = [],
+      seg = [];
+    return {
+      add(geometry, bb) {
+        const rings = ringsOf(geometry);
+        if (!rings.length) return null;
+        const start = tri.length / 2;
+        for (const r of rings) {
+          const n = r.length / 2;
+          for (let i = 1; i + 1 < n; i++) tri.push(r[0], r[1], r[2 * i], r[2 * i + 1], r[2 * i + 2], r[2 * i + 3]);
+          for (let i = 0; i < n; i++) {
+            const j = (i + 1) % n;
+            if (r[2 * i] !== r[2 * j] || r[2 * i + 1] !== r[2 * j + 1]) seg.push(r[2 * i], r[2 * i + 1], r[2 * j], r[2 * j + 1]);
+          }
+        }
+        const count = tri.length / 2 - start;
+        if (!count) return null;
+        const [x0, y0, x1, y1] = [bb[0] - 1, bb[1] - 1, bb[2] + 1, bb[3] + 1];
+        const cover = tri.length / 2;
+        tri.push(x0, y0, x1, y0, x0, y1, x0, y1, x1, y0, x1, y1);
+        return { start, count, cover };
+      },
+      upload() {
+        const L = { fillVao: gl.createVertexArray(), lineVao: gl.createVertexArray(), nSeg: seg.length / 4, bufs: [] };
+        const triBuf = gl.createBuffer();
+        gl.bindVertexArray(L.fillVao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, triBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(tri), gl.STATIC_DRAW);
+        const pLoc = gl.getAttribLocation(glFill.pr, "p");
+        gl.enableVertexAttribArray(pLoc);
+        gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 0, 0);
+        const segBuf = gl.createBuffer();
+        gl.bindVertexArray(L.lineVao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, segBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(seg), gl.STATIC_DRAW);
+        const sLoc = gl.getAttribLocation(glLine.pr, "seg");
+        gl.enableVertexAttribArray(sLoc);
+        gl.vertexAttribPointer(sLoc, 4, gl.FLOAT, false, 0, 0);
+        gl.vertexAttribDivisor(sLoc, 1);
+        gl.bindBuffer(gl.ARRAY_BUFFER, glCorner);
+        const cLoc = gl.getAttribLocation(glLine.pr, "corner");
+        gl.enableVertexAttribArray(cLoc);
+        gl.vertexAttribPointer(cLoc, 2, gl.FLOAT, false, 0, 0);
+        gl.bindVertexArray(null);
+        L.bufs = [triBuf, segBuf];
+        tri.length = 0;
+        seg.length = 0;
+        return L;
+      },
+    };
+  }
+  function glFree(L) {
+    if (!L || !gl) return;
+    gl.deleteVertexArray(L.fillVao);
+    gl.deleteVertexArray(L.lineVao);
+    L.bufs.forEach((b) => gl.deleteBuffer(b));
+  }
+
+  // 1:50m, right after the map is (re)built for a new size or map.
+  function glBuildMd() {
+    if (!gl) return;
+    glFree(glMd);
+    glFree(glHd);
+    glMd = glHd = null;
+    const b = glBuilder();
+    const ctx = [];
+    for (const sh of ctxShapes) {
+      const g = sh.geom && b.add(sh.geom, sh.bb);
+      if (g) ctx.push({ g, bb: sh.bb });
+    }
+    const its = [];
+    for (const it of items.values()) {
+      const g = it.hi && it.c.geometry && b.add(it.c.geometry, it.bb);
+      if (g) its.push({ it, g });
+    }
+    glMd = { ...b.upload(), ctx, its };
+    glBuildHd();
+  }
+
+  // 1:10m, a few shapes per idle slice so it never blocks the page.
+  function glBuildHd() {
+    if (!gl || !HD || !proj || !glMd) return;
+    const gen = ++glBuildHd.gen;
+    const b = glBuilder();
+    const ctx = [],
+      its = [];
+    const todo = [];
+    for (const i of HD.context) todo.push(() => {
+      const geom = HD.geomOf([i]);
+      const bbx = d3.geoPath(proj).bounds({ type: "Feature", geometry: geom });
+      const bb = [bbx[0][0], bbx[0][1], bbx[1][0], bbx[1][1]];
+      if (!isFinite(bb[0])) return;
+      const g = b.add(geom, bb);
+      if (g) ctx.push({ g, bb });
+    });
+    for (const it of items.values())
+      if (it.hi && HD.countries[it.c.id])
+        todo.push(() => {
+          const g = b.add(HD.geomOf(HD.countries[it.c.id]), it.bb);
+          if (g) its.push({ it, g });
+        });
+    const idle = window.requestIdleCallback || ((f) => setTimeout(() => f({ timeRemaining: () => 8 }), 16));
+    const step = (dl) => {
+      if (gen !== glBuildHd.gen || !gl) return; // the map was rebuilt
+      while (todo.length && dl.timeRemaining() > 2) todo.shift()();
+      if (todo.length) return idle(step);
+      glHd = { ...b.upload(), ctx, its };
+      request(true);
+    };
+    idle(step);
+  }
+  glBuildHd.gen = 0;
+
+  // CSS colour -> [r, g, b, a] (0..1), cached.
+  const rgbaCache = new Map();
+  const parseCtx = document.createElement("canvas").getContext("2d");
+  function rgba(css) {
+    let v = rgbaCache.get(css);
+    if (!v) {
+      parseCtx.fillStyle = "#000";
+      parseCtx.fillStyle = css;
+      const s = parseCtx.fillStyle;
+      if (s[0] === "#") v = [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16) / 255).concat(1);
+      else {
+        const m = s.match(/[\d.]+/g).map(Number);
+        v = [m[0] / 255, m[1] / 255, m[2] / 255, m.length > 3 ? m[3] : 1];
+      }
+      rgbaCache.set(css, v);
+    }
+    return v;
+  }
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, 1];
+
+  function drawGL() {
+    const k = transform.k;
+    const L = k >= LO_K && glHd ? glHd : glMd;
+    gl.viewport(0, 0, glCv.width, glCv.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clearStencil(0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+    if (!L) return;
+    const xf = [k, transform.x, transform.y];
+
+    gl.useProgram(glFill.pr);
+    gl.uniform3fv(glFill.xf, xf);
+    gl.uniform2f(glFill.res, W, H);
+    gl.bindVertexArray(L.fillVao);
+    gl.enable(gl.STENCIL_TEST);
+    gl.stencilMask(1);
+    const fill = (g, col) => {
+      gl.colorMask(false, false, false, false);
+      gl.stencilFunc(gl.ALWAYS, 0, 1);
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.INVERT);
+      gl.drawArrays(gl.TRIANGLES, g.start, g.count);
+      gl.colorMask(true, true, true, true);
+      gl.stencilFunc(gl.EQUAL, 1, 1);
+      gl.stencilOp(gl.ZERO, gl.ZERO, gl.ZERO);
+      gl.uniform4fv(glFill.color, col);
+      gl.drawArrays(gl.TRIANGLES, g.cover, 6);
+    };
+    const ctxCol = rgba(colors.ctx);
+    for (const s of L.ctx) if (onScreen(s.bb, k, 2)) fill(s.g, ctxCol);
+    const tints = hint("tints");
+    const tintA = colors.dark ? 0.07 : 0.08;
+    for (const { it, g } of L.its) {
+      if (!onScreen(it.bb, k, 2)) continue;
+      let col;
+      if (it.shown) col = rgba(resultColor(it.shown));
+      else {
+        col = rgba(colors.shades[shadeOf.get(it.c.id)]);
+        if (tints) col = mix(col, rgba(regionTint.get(it.c.subregion)), tintA);
+      }
+      fill(g, col);
+    }
+    gl.disable(gl.STENCIL_TEST);
+
+    gl.useProgram(glLine.pr);
+    gl.uniform3fv(glLine.xf, xf);
+    gl.uniform2f(glLine.res, W, H);
+    gl.uniform1f(glLine.hw, 0.55);
+    gl.uniform4fv(glLine.color, rgba(colors.stroke));
+    gl.bindVertexArray(L.lineVao);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, L.nSeg);
+    gl.bindVertexArray(null);
+  }
+
+  // (2D canvas fallback) While the map moves under your fingers the base canvas isn't redrawn: its last picture is
   // moved with a CSS transform, which the GPU does almost for free. Returns false when too much
   // of the screen would be left uncovered, so a real redraw is needed.
   let drawnAt = d3.zoomIdentity;
@@ -498,6 +792,10 @@
   }
 
   function drawBase() {
+    if (gl) drawGL();
+    else drawBase2D();
+  }
+  function drawBase2D() {
     const k = transform.k;
     drawnAt = transform;
     baseCv.style.transform = "";
@@ -1395,6 +1693,7 @@
   }
 
   // ---------- go ----------
+  initGL();
   readColors();
   renderMenu();
   buildMap();
