@@ -29,9 +29,13 @@
   --land: #d3cebf;
   --land-hover: #c4bfae;
   --land-ctx: #e5e1d6;
-  --land-stroke: #f6f4ef;
-  --good: #2e9e72;
-  --bad: #ff5e3a;
+  --land-stroke: #ff5e3a;
+  /* yooperlite: glowing orange when you get it first try, darker the more guesses it took */
+  --yooper-1: #ff9f1c;
+  --yooper-2: #dd7010;
+  --yooper-3: #93420b;
+  --bad: #d13a30;
+  --hover-tint: rgb(26 31 43 / 11%);
   --cursor-core: #1a1f2b;
   --cursor-halo: #fffefb;
   --dot: #7d7a6c;
@@ -51,12 +55,16 @@
   --shadow-card: 0 1px 0 rgb(0 0 0 / 30%), 0 16px 32px -20px rgb(0 0 0 / 70%);
   --shadow-hero: 0 22px 40px -22px rgb(255 94 58 / 45%);
 
-  --ocean: #1f1e1c;
-  --land: #3d3c37;
-  --land-hover: #4d4b44;
-  --land-ctx: #2c2b28;
-  --land-stroke: #1f1e1c;
-  --good: #4fb383;
+  --ocean: #050505;
+  --land: #232220;
+  --land-hover: #2e2d2a;
+  --land-ctx: #141413;
+  --land-stroke: #ff5e3a;
+  --yooper-1: #ffa621;
+  --yooper-2: #de7512;
+  --yooper-3: #8f4409;
+  --bad: #e5534b;
+  --hover-tint: rgb(255 255 255 / 11%);
   --cursor-core: #ede9e0;
   --cursor-halo: #191817;
   --dot: #a8a291;
@@ -109,111 +117,22 @@ html:-webkit-full-screen #stage {
   border-radius: 0;
   border: 0;
 }
-#map {
+
+/* ---------- Map (two stacked canvases: the map, then highlights/dots/labels) ---------- */
+#base,
+#top {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   display: block;
 }
-#stage[data-screen="play"] #map {
-  cursor: none;
-}
-#stage[data-screen="menu"] #map {
+#stage[data-screen="menu"] #base,
+#stage[data-screen="menu"] #top {
   opacity: 0.55;
 }
 
-/* ---------- Map shapes ---------- */
-.shape {
-  fill: var(--land);
-  stroke: var(--land-stroke);
-  stroke-width: 0.7;
-  vector-effect: non-scaling-stroke;
-  stroke-linejoin: round;
-  transition: fill 0.18s ease;
-}
-.shape.ctx {
-  fill: var(--land-ctx);
-  pointer-events: none;
-}
-#stage[data-screen="play"] .shape.pool:hover {
-  fill: var(--land-hover);
-}
-.shape.correct,
-#stage[data-screen="play"] .shape.pool.correct:hover {
-  fill: var(--good);
-}
-.shape.missed,
-#stage[data-screen="play"] .shape.pool.missed:hover {
-  fill: var(--bad);
-}
-.shape.wrong {
-  fill: var(--destructive) !important;
-}
-.shape.reveal {
-  animation: reveal 0.55s ease-in-out 3;
-}
-@keyframes reveal {
-  0%,
-  100% {
-    fill: var(--land);
-  }
-  50% {
-    fill: var(--accent);
-  }
-}
-
-/* Tiny countries become dots so they can be seen and clicked */
-.dot-g .hit {
-  fill: transparent;
-}
-.dot-g .vis {
-  fill: var(--dot);
-  stroke: var(--ocean);
-  stroke-width: 1;
-  transition: fill 0.18s ease, r 0.12s ease;
-}
-#stage[data-screen="play"] .dot-g:hover .vis {
-  fill: var(--foreground);
-}
-.dot-g.correct .vis {
-  fill: var(--good);
-}
-.dot-g.missed .vis {
-  fill: var(--bad);
-}
-.dot-g.wrong .vis {
-  fill: var(--destructive);
-}
-.dot-g.reveal .vis {
-  animation: reveal-dot 0.55s ease-in-out 3;
-}
-@keyframes reveal-dot {
-  0%,
-  100% {
-    fill: var(--dot);
-  }
-  50% {
-    fill: var(--accent);
-  }
-}
-
-.label {
-  font-family: var(--font-sans);
-  font-weight: 700;
-  fill: #fff;
-  stroke: rgb(26 31 43 / 70%);
-  stroke-width: 3px;
-  paint-order: stroke;
-  stroke-linejoin: round;
-  pointer-events: none;
-  text-anchor: middle;
-}
-.label.side {
-  text-anchor: start;
-}
-
-/* ---------- Crosshair cursor + "find" pill ---------- */
+/* ---------- "Find" label that follows the pointer ---------- */
 #cursor {
   position: absolute;
   left: 0;
@@ -222,70 +141,31 @@ html:-webkit-full-screen #stage {
   pointer-events: none;
   will-change: transform;
 }
-#cursor .plus {
-  position: absolute;
-  left: -14px;
-  top: -14px;
-  overflow: visible;
-}
-#cursor .halo {
-  stroke: var(--cursor-halo);
-  stroke-width: 5.5;
-  stroke-linecap: round;
-  fill: none;
-}
-#cursor .core {
-  stroke: var(--cursor-core);
-  stroke-width: 2.4;
-  stroke-linecap: round;
-  fill: none;
-}
 #pill {
   position: absolute;
-  top: 19px;
+  top: 24px; /* clear of the system pointer's tail */
   left: 0;
   transform: translateX(-50%);
   white-space: nowrap;
   display: flex;
   align-items: baseline;
-  gap: 6px;
-  padding: 5px 11px 6px;
+  gap: 5px;
+  padding: 3px 9px 4px;
   border-radius: 999px;
-  background: var(--navy);
+  background: var(--coral);
   color: #fff;
-  font-size: 14px;
-  box-shadow: 0 6px 16px -6px rgb(26 31 43 / 55%);
-  border: 1px solid rgb(255 255 255 / 14%);
-}
-.dark #pill {
-  background: var(--sun);
-  color: var(--navy);
-  border-color: transparent;
+  font-size: 12px;
+  box-shadow: 0 5px 12px -6px rgb(255 94 58 / 80%);
 }
 #pill .k {
   font-family: var(--font-hand);
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 700;
-  color: var(--sun);
+  color: rgb(255 255 255 / 78%);
   line-height: 1;
-}
-.dark #pill .k {
-  color: var(--coral);
 }
 #pill b {
   font-weight: 700;
-}
-#pill.good {
-  background: var(--good);
-  color: #fff;
-}
-#pill.bad {
-  background: var(--coral);
-  color: #fff;
-}
-#pill.good .k,
-#pill.bad .k {
-  color: #fff;
 }
 
 /* ---------- HUD ---------- */
@@ -447,7 +327,7 @@ html:-webkit-full-screen #stage {
   border-radius: 50%;
 }
 .dot.good {
-  background: var(--good);
+  background: var(--yooper-1);
 }
 .dot.bad {
   background: var(--bad);
@@ -468,28 +348,6 @@ html:-webkit-full-screen #stage {
   display: none;
 }
 
-.ping {
-  position: absolute;
-  width: 14px;
-  height: 14px;
-  margin: -7px 0 0 -7px;
-  border-radius: 50%;
-  border: 3px solid var(--sun);
-  pointer-events: none;
-  z-index: 3;
-  animation: ping 0.9s ease-out 2;
-}
-@keyframes ping {
-  from {
-    transform: scale(0.6);
-    opacity: 1;
-  }
-  to {
-    transform: scale(5);
-    opacity: 0;
-  }
-}
-
 /* ---------- Overlays (menu / results) ---------- */
 .overlay {
   position: absolute;
@@ -499,9 +357,7 @@ html:-webkit-full-screen #stage {
   place-items: center;
   padding: 16px;
   overflow: auto;
-  background: color-mix(in srgb, var(--ocean) 45%, transparent);
-  backdrop-filter: blur(3px);
-  -webkit-backdrop-filter: blur(3px);
+  background: color-mix(in srgb, var(--ocean) 60%, transparent);
   touch-action: pan-y;
 }
 #end.overlay {
@@ -779,14 +635,4 @@ html:-webkit-full-screen #stage {
     flex-basis: 100%;
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  .shape.reveal,
-  .dot-g.reveal .vis,
-  .ping {
-    animation: none;
-  }
-  .shape,
-  .dot-g .vis {
-    transition: none;
-  }
-}
+

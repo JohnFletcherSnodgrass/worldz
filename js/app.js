@@ -1,11 +1,20 @@
-/* worldz: click the country you're asked for. */
+/* worldz: click the country you're asked for.
+ *
+ * Rendering: two stacked <canvas> layers.
+ *   #base  the map itself (country fills + orange outlines). Redrawn only when you zoom/pan,
+ *          resize, or a country changes colour.
+ *   #top   everything that moves or flashes: hover tint, wrong/reveal flashes, dots for tiny
+ *          countries, labels, ping rings. Cheap to redraw every frame.
+ */
 (() => {
   "use strict";
 
   const D = window.WORLDZ_DATA; // real Natural Earth outlines + country list (see scripts/build-data.mjs)
   const R = 6371.0088; // km
   const SMALL_KM2 = 100000; // "small" = under 100,000 km²
-  const DOT_PX = 7; // countries drawn smaller than this on screen become clickable dots
+  const DOT_PX = 10; // countries drawn smaller than this on screen become clickable dots
+  const LO_K = 2.5; // below this zoom the simplified outlines are used
+  const FONT = '"Helvetica Neue", Helvetica, Arial, sans-serif';
 
   const MODES = [
     { id: "world", name: "World", box: [-179.9, -56, 179.9, 84] },
@@ -30,7 +39,11 @@
 
   const $ = (s) => document.querySelector(s);
   const stage = $("#stage");
-  const svg = d3.select("#map");
+  const baseCv = $("#base");
+  const topCv = $("#top");
+  const bctx = baseCv.getContext("2d");
+  const tctx = topCv.getContext("2d");
+  const hitCtx = document.createElement("canvas").getContext("2d");
   const cursorEl = $("#cursor");
   const pillEl = $("#pill");
 
@@ -84,99 +97,190 @@
     return keep.length ? { type: "MultiPolygon", coordinates: keep } : null;
   }
 
+  // ---------- colours (read from the CSS tokens so light/dark and the Pebblez palette stay in one place) ----------
+  let colors = {};
+  function readColors() {
+    const cs = getComputedStyle(document.documentElement);
+    const g = (n) => cs.getPropertyValue(n).trim();
+    colors = {
+      land: g("--land"),
+      ctx: g("--land-ctx"),
+      stroke: g("--land-stroke"),
+      ocean: g("--ocean"),
+      t1: g("--yooper-1"),
+      t2: g("--yooper-2"),
+      t3: g("--yooper-3"),
+      missed: g("--bad"),
+      wrong: g("--destructive"),
+      accent: g("--accent"),
+      dot: g("--dot"),
+      dotHover: g("--foreground"),
+      tint: g("--hover-tint"),
+    };
+  }
+  const resultColor = (r) => (r.ok ? colors["t" + Math.min(3, r.tries)] : colors.missed);
+
   // ---------- map ----------
   let W = 0,
     H = 0,
+    dpr = 1,
     proj = null,
     transform = d3.zoomIdentity,
     zoomBehavior = null;
-  let items = new Map(); // country id -> { c, shape, dot, label, ax, ay, size, lw, pool }
-  let poolIds = new Set();
-  let zoomG, dotsG, labelsG;
+  let items = new Map(); // country id -> item
+  let poolItems = []; // clickable countries
+  let dotItems = []; // pool countries that can show as a dot
+  let ctxShapes = []; // territories etc, drawn dim and not clickable
+  const active = new Set(); // items with a running flash / label / shake
+  let pings = []; // { id, t0 }
+  let stageRect = { left: 0, top: 0, width: 0, height: 0 };
+  let hover = null;
+
+  // Outline simplifier for the zoomed-out view: drops points closer than `tol` px to the last kept one.
+  function lowRes(projection, tol) {
+    let s = "",
+      lx = 0,
+      ly = 0;
+    const t2 = tol * tol;
+    const sink = {
+      moveTo(x, y) {
+        s += "M" + x.toFixed(1) + " " + y.toFixed(1);
+        lx = x;
+        ly = y;
+      },
+      lineTo(x, y) {
+        const dx = x - lx,
+          dy = y - ly;
+        if (dx * dx + dy * dy >= t2) {
+          s += "L" + x.toFixed(1) + " " + y.toFixed(1);
+          lx = x;
+          ly = y;
+        }
+      },
+      closePath() {
+        s += "Z";
+      },
+      arc() {},
+      rect() {},
+    };
+    const gp = d3.geoPath(projection, sink);
+    return (feat) => {
+      s = "";
+      gp(feat);
+      return s;
+    };
+  }
+
+  // Drawing resolution. Starts at the screen's pixel density (max 2) and steps down automatically
+  // if frames come out slow while panning/zooming, so slower machines stay smooth.
+  let dprCap = Math.min(2, window.devicePixelRatio || 1);
+  function sizeCanvases() {
+    dpr = dprCap;
+    for (const c of [baseCv, topCv]) {
+      c.width = Math.round(W * dpr);
+      c.height = Math.round(H * dpr);
+    }
+  }
+  let lastFrame = 0,
+    slowFrames = 0;
+  function watchFrameRate(now) {
+    const dt = now - lastFrame;
+    lastFrame = now;
+    if (dt > 120 || dt <= 0) return; // idle gap, not a gesture
+    slowFrames = dt > 30 ? slowFrames + 1 : Math.max(0, slowFrames - 1);
+    if (slowFrames >= 10 && dprCap > 1) {
+      slowFrames = 0;
+      dprCap = Math.max(1, dprCap - 0.5);
+      sizeCanvases();
+      dirtyBase = true;
+    }
+  }
 
   function buildMap() {
-    const rect = stage.getBoundingClientRect();
+    const rect = topCv.getBoundingClientRect(); // the canvas sits inside the stage's 1px border
+    stageRect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
     W = Math.max(280, rect.width);
     H = Math.max(280, rect.height);
-    svg.attr("viewBox", `0 0 ${W} ${H}`);
-    svg.selectAll("*").remove();
+    sizeCanvases();
     items = new Map();
+    poolItems = [];
+    dotItems = [];
+    ctxShapes = [];
+    active.clear();
+    pings = [];
+    hover = null;
 
     const mode = modeOf(settings.mode);
     const [w, s, e, n] = mode.box;
     const pts = [];
     for (let x = w; x <= e; x += (e - w) / 24) for (const y of [s, n]) pts.push([x, y]);
     for (let y = s; y <= n; y += (n - s) / 12) for (const x of [w, e]) pts.push([x, y]);
+    const outline = { type: "MultiPoint", coordinates: pts };
     const top = screen === "menu" ? 20 : 76;
-    const bottom = screen === "menu" ? 20 : 54;
+    const bottom = top; // equal margins keep the map centred, so the pan limit matches its starting position
     proj = d3.geoNaturalEarth1().rotate([-(w + e) / 2, 0]);
     proj.fitExtent(
       [
         [16, top],
         [W - 16, H - bottom],
       ],
-      { type: "MultiPoint", coordinates: pts },
+      outline,
     );
-    const path = d3.geoPath(proj);
-
-    zoomG = svg.append("g");
-    const ctxG = zoomG.append("g");
-    const poolG = zoomG.append("g");
-    dotsG = svg.append("g");
-    labelsG = svg.append("g");
+    const hiPath = d3.geoPath(proj).digits(2);
+    const loPath = lowRes(proj, 0.5);
+    const bounds = d3.geoPath(proj);
+    // The map's own outline: panning is not allowed past it.
+    const outlineBox = bounds.bounds(outline);
 
     const pool = new Set(poolFor(settings.mode, settings.size).map((c) => c.id));
-    poolIds = pool;
+
+    const mkShape = (feat) => {
+      const hiStr = hiPath(feat);
+      if (!hiStr) return null;
+      const bb = bounds.bounds(feat);
+      return { hi: new Path2D(hiStr), lo: new Path2D(loPath(feat) || hiStr), bb: [bb[0][0], bb[0][1], bb[1][0], bb[1][1]] };
+    };
 
     // Territories and non-country shapes: context only.
     for (const x of D.context) {
       const g = crop(x.geometry, mode);
-      const d = g && path({ type: "Feature", geometry: g });
-      if (d) ctxG.append("path").attr("class", "shape ctx").attr("d", d);
+      const sh = g && mkShape({ type: "Feature", geometry: g });
+      if (sh) ctxShapes.push(sh);
     }
 
     for (const c of D.countries) {
       const g = c.geometry ? crop(c.geometry, mode) : null;
-      const it = { c, shape: null, dot: null, label: null, ax: 0, ay: 0, size: 0, lw: 0, pool: pool.has(c.id) };
-      let d = null;
+      const it = { c, hi: null, lo: null, bb: null, ax: 0, ay: 0, size: 0, lw: 0, pool: pool.has(c.id), dotCapable: false, shown: null, labelOn: false, flash: null, pulse: null, tmp: null, shake: null };
+      let ok = false;
       if (g) {
         const feat = { type: "Feature", geometry: g };
-        d = path(feat);
-        if (d) {
-          const b = path.bounds(feat);
-          it.size = Math.max(b[1][0] - b[0][0], b[1][1] - b[0][1]);
+        const sh = mkShape(feat);
+        if (sh) {
+          ok = true;
+          it.hi = sh.hi;
+          it.lo = sh.lo;
+          it.bb = sh.bb;
+          it.size = Math.max(sh.bb[2] - sh.bb[0], sh.bb[3] - sh.bb[1]);
           const big = polysOf(g).reduce((a, p) => (polyInfo(p).area > polyInfo(a).area ? p : a));
           const bigFeat = { type: "Feature", geometry: { type: "Polygon", coordinates: big } };
-          const bb = path.bounds(bigFeat);
+          const bb = bounds.bounds(bigFeat);
           it.lw = bb[1][0] - bb[0][0];
-          const cen = path.centroid(bigFeat);
+          const cen = bounds.centroid(bigFeat);
           it.ax = cen[0];
           it.ay = cen[1];
         }
       }
-      if (!d) {
+      if (!ok) {
         // No outline (e.g. Tuvalu): place it from its listed coordinates.
         const p = proj([c.latlng[1], c.latlng[0]]);
         if (!p) continue;
         it.ax = p[0];
         it.ay = p[1];
       }
-      if (d) {
-        it.shape = (it.pool ? poolG : ctxG)
-          .append("path")
-          .attr("class", it.pool ? "shape pool" : "shape ctx")
-          .attr("d", d);
-        if (it.pool) it.shape.attr("data-id", c.id);
-      }
-      if (it.pool && (!d || it.size < DOT_PX * 6)) {
-        it.dot = dotsG.append("g").attr("class", "dot-g").attr("data-id", c.id).style("display", "none");
-        it.dot.append("circle").attr("class", "hit").attr("r", 10);
-        it.dot.append("circle").attr("class", "vis").attr("r", 3.4);
-      }
-      if (it.pool) {
-        it.label = labelsG.append("text").attr("class", "label").style("display", "none").text(c.name);
-      }
+      it.dotCapable = it.pool && (!ok || it.size < DOT_PX * 6);
       items.set(c.id, it);
+      if (it.pool) poolItems.push(it);
+      if (it.dotCapable) dotItems.push(it);
     }
 
     zoomBehavior = d3
@@ -186,95 +290,265 @@
         [0, 0],
         [W, H],
       ])
+      // Can't be dragged past the edge of the map: the pan limit is the map's own outline.
       .translateExtent([
-        [-W * 0.1, -H * 0.1],
-        [W * 1.1, H * 1.1],
+        [outlineBox[0][0], outlineBox[0][1]],
+        [outlineBox[1][0], outlineBox[1][1]],
       ])
       .clickDistance(4)
       .filter((ev) => !ev.button && ev.type !== "dblclick")
       .on("zoom", (ev) => {
         transform = ev.transform;
-        zoomG.attr("transform", transform);
-        scheduleLayout();
+        request(true);
       });
-    svg.on(".zoom", null);
-    svg.call(zoomBehavior).on("dblclick.zoom", null);
+    const sel = d3.select(topCv);
+    sel.on(".zoom", null);
+    sel.call(zoomBehavior).on("dblclick.zoom", null);
     transform = d3.zoomIdentity;
+    // d3 centres the map when it's smaller than the window; apply that starting position.
+    sel.call(zoomBehavior.transform, d3.zoomIdentity);
     applyState();
-    layoutOverlay();
   }
 
-  // Positions dots and labels in screen space (so they stay a constant size while zooming).
-  let layoutQueued = false;
-  function scheduleLayout() {
-    if (layoutQueued) return;
-    layoutQueued = true;
-    requestAnimationFrame(() => {
-      layoutQueued = false;
-      layoutOverlay();
-    });
+  // ---------- drawing ----------
+  let dirtyBase = true,
+    dirtyTop = true,
+    raf = 0,
+    ptr = null,
+    ptrDirty = false;
+
+  function request(base) {
+    if (base) dirtyBase = true;
+    dirtyTop = true;
+    if (!raf) raf = requestAnimationFrame(frame);
   }
-  function layoutOverlay() {
+
+  function frame(now) {
+    raf = 0;
+    watchFrameRate(now || performance.now());
+    if (ptrDirty) {
+      ptrDirty = false;
+      moveCursor();
+    }
+    if (dirtyBase) {
+      dirtyBase = false;
+      drawBase();
+    }
+    dirtyTop = false;
+    if (drawTop(performance.now())) request(false);
+  }
+
+  const onScreen = (bb, k, pad) => {
+    const x0 = bb[0] * k + transform.x,
+      x1 = bb[2] * k + transform.x,
+      y0 = bb[1] * k + transform.y,
+      y1 = bb[3] * k + transform.y;
+    return x1 > -pad && x0 < W + pad && y1 > -pad && y0 < H + pad;
+  };
+
+  function drawBase() {
     const k = transform.k;
+    bctx.setTransform(1, 0, 0, 1, 0, 0);
+    bctx.clearRect(0, 0, baseCv.width, baseCv.height);
+    bctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * transform.x, dpr * transform.y);
+    bctx.lineJoin = "round";
+    bctx.lineWidth = 0.8 / k; // constant on-screen thickness
+    bctx.strokeStyle = colors.stroke;
+    const lo = k < LO_K;
+    for (const sh of ctxShapes) {
+      if (!onScreen(sh.bb, k, 2)) continue;
+      const p = lo ? sh.lo : sh.hi;
+      bctx.fillStyle = colors.ctx;
+      bctx.fill(p, "evenodd");
+      bctx.stroke(p);
+    }
     for (const it of items.values()) {
-      if (!it.pool) continue;
-      const [x, y] = transform.apply([it.ax, it.ay]);
-      const asDot = it.size * k < DOT_PX; // too small to click as a shape
-      if (it.dot) {
-        it.dot.style("display", asDot ? null : "none");
-        if (asDot) it.dot.attr("transform", `translate(${x},${y})`);
-      }
-      if (it.labelOn) {
-        const len = it.c.name.length;
-        if (asDot) {
-          it.label.classed("side", true).attr("transform", `translate(${x + 7},${y + 3})`).style("font-size", "8.5px");
-        } else {
-          const fs = Math.max(8.5, Math.min(14, (it.lw * k) / (len * 0.56)));
-          it.label
-            .classed("side", false)
-            .attr("transform", `translate(${x},${y + fs * 0.35})`)
-            .style("font-size", fs + "px");
+      if (!it.hi || !onScreen(it.bb, k, 2)) continue;
+      const p = lo ? it.lo : it.hi;
+      bctx.fillStyle = it.pool ? (it.shown ? resultColor(it.shown) : colors.land) : colors.ctx;
+      bctx.fill(p, "evenodd");
+      bctx.stroke(p);
+    }
+  }
+
+  const isDot = (it, k) => it.dotCapable && (!it.hi || it.size * k < DOT_PX);
+
+  function drawTop(now) {
+    const k = transform.k;
+    let anim = false;
+    tctx.setTransform(1, 0, 0, 1, 0, 0);
+    tctx.clearRect(0, 0, topCv.width, topCv.height);
+
+    // highlights drawn in map space
+    tctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * transform.x, dpr * transform.y);
+    if (hover && screen === "play" && hover.hi && !hover.shown) {
+      tctx.fillStyle = colors.tint;
+      tctx.fill(k < LO_K ? hover.lo : hover.hi, "evenodd");
+    }
+    for (const it of active) {
+      if (it.flash) {
+        const a = 1 - (now - it.flash.t0) / it.flash.dur;
+        if (a <= 0) it.flash = null;
+        else {
+          anim = true;
+          if (it.hi) {
+            tctx.globalAlpha = Math.min(1, a * 1.1);
+            tctx.fillStyle = it.flash.color;
+            tctx.fill(k < LO_K ? it.lo : it.hi, "evenodd");
+          }
         }
       }
+      if (it.pulse) {
+        const e = now - it.pulse.t0;
+        if (e > it.pulse.dur) it.pulse = null;
+        else {
+          anim = true;
+          if (it.hi) {
+            tctx.globalAlpha = 0.25 + 0.75 * Math.abs(Math.sin((e / 550) * Math.PI));
+            tctx.fillStyle = colors.accent;
+            tctx.fill(k < LO_K ? it.lo : it.hi, "evenodd");
+          }
+        }
+      }
+      tctx.globalAlpha = 1;
     }
+
+    // dots, labels, pings in screen space
+    tctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    for (const it of dotItems) {
+      if (!isDot(it, k)) continue;
+      const x = it.ax * k + transform.x,
+        y = it.ay * k + transform.y;
+      if (x < -12 || x > W + 12 || y < -12 || y > H + 12) continue;
+      let col = it === hover && screen === "play" ? colors.dotHover : colors.dot;
+      if (it.shown) col = resultColor(it.shown);
+      if (it.flash) col = it.flash.color;
+      if (it.pulse && Math.sin(((now - it.pulse.t0) / 550) * Math.PI) > 0) col = colors.accent;
+      tctx.beginPath();
+      tctx.arc(x, y, 3.4, 0, 6.2832);
+      tctx.fillStyle = col;
+      tctx.fill();
+      tctx.lineWidth = 1;
+      tctx.strokeStyle = colors.ocean;
+      tctx.stroke();
+    }
+
+    tctx.lineJoin = "round";
+    tctx.textBaseline = "alphabetic";
+    for (const it of poolItems) {
+      const tmp = it.tmp && it.tmp.until > now ? it.tmp : null;
+      if (it.tmp && !tmp) it.tmp = null;
+      if (!it.labelOn && !tmp) continue;
+      let x = it.ax * k + transform.x,
+        y = it.ay * k + transform.y;
+      if (x < -80 || x > W + 80 || y < -30 || y > H + 30) continue;
+      const asDot = isDot(it, k);
+      const name = it.c.name;
+      let fs;
+      if (asDot) {
+        fs = 9;
+        x += 7;
+        y += 3;
+      } else {
+        fs = Math.max(9, Math.min(14, (it.lw * k) / (name.length * 0.56)));
+        y += fs * 0.35;
+      }
+      if (tmp && tmp.kind === "wrong") fs = Math.max(fs, 12);
+      // a wrong guess: the label appears and shakes
+      if (it.shake) {
+        const e = now - it.shake.t0;
+        if (e > it.shake.dur) it.shake = null;
+        else {
+          anim = true;
+          x += Math.sin(e / 38) * 7 * (1 - e / it.shake.dur);
+        }
+      }
+      if (tmp) anim = true;
+      tctx.font = "700 " + fs + "px " + FONT;
+      tctx.textAlign = asDot ? "left" : "center";
+      tctx.lineWidth = 3;
+      tctx.strokeStyle = tmp && tmp.kind === "wrong" ? "rgb(150 30 22 / 92%)" : "rgb(10 10 10 / 72%)";
+      tctx.strokeText(name, x, y);
+      tctx.fillStyle = "#fff";
+      tctx.fillText(name, x, y);
+    }
+
+    if (pings.length) {
+      tctx.lineWidth = 3;
+      tctx.strokeStyle = colors.accent;
+      pings = pings.filter((p) => now - p.t0 < 1800);
+      for (const p of pings) {
+        const it = items.get(p.id);
+        if (!it) continue;
+        anim = true;
+        const ph = ((now - p.t0) % 900) / 900;
+        tctx.globalAlpha = 1 - ph;
+        tctx.beginPath();
+        tctx.arc(it.ax * k + transform.x, it.ay * k + transform.y, 5 + ph * 34, 0, 6.2832);
+        tctx.stroke();
+      }
+      tctx.globalAlpha = 1;
+    }
+
+    // forget items whose effects ended
+    for (const it of active) if (!it.flash && !it.pulse && !it.shake && !(it.tmp && it.tmp.until > now)) active.delete(it);
+    return anim || active.size > 0;
   }
 
   // Paint results (fill + labels) onto the map.
   function applyState() {
     const level = levelOf(settings.level);
     const reveal = screen === "end" || screen === "review";
-    for (const it of items.values()) {
-      if (!it.pool) continue;
+    for (const it of poolItems) {
       const r = game && game.results.get(it.c.id);
-      const show = r && (level.fill || reveal);
-      for (const el of [it.shape, it.dot]) {
-        if (!el) continue;
-        el.classed("correct", !!(show && r.ok)).classed("missed", !!(show && !r.ok));
-      }
-      it.labelOn = !!show;
-      it.label.style("display", show ? null : "none");
+      it.shown = r && (level.fill || reveal) ? r : null;
+      it.labelOn = !!it.shown;
     }
-    layoutOverlay();
+    request(true);
   }
 
-  function flash(id, cls, ms) {
-    const it = items.get(id);
-    if (!it) return;
-    for (const el of [it.shape, it.dot]) el && el.classed(cls, true);
-    setTimeout(() => {
-      for (const el of [it.shape, it.dot]) el && el.classed(cls, false);
-    }, ms);
-  }
-  function ping(id) {
-    const it = items.get(id);
-    if (!it) return;
-    const [x, y] = transform.apply([it.ax, it.ay]);
-    const p = document.createElement("div");
-    p.className = "ping";
-    p.style.left = x + "px";
-    p.style.top = y + "px";
-    stage.appendChild(p);
-    setTimeout(() => p.remove(), 1900);
+  const touch = (it) => active.add(it);
+
+  // ---------- hit testing ----------
+  function hit(px, py) {
+    const k = transform.k;
+    let best = null,
+      bd = 100; // 10px radius for dots
+    for (const it of dotItems) {
+      if (!isDot(it, k)) continue;
+      const dx = it.ax * k + transform.x - px,
+        dy = it.ay * k + transform.y - py;
+      const d = dx * dx + dy * dy;
+      if (d < bd) {
+        bd = d;
+        best = it;
+      }
+    }
+    if (best) return best;
+    const mx = (px - transform.x) / k,
+      my = (py - transform.y) / k;
+    for (const it of poolItems) {
+      if (!it.hi) continue;
+      const b = it.bb;
+      if (mx < b[0] || mx > b[2] || my < b[1] || my > b[3]) continue;
+      if (hitCtx.isPointInPath(it.hi, mx, my, "evenodd")) return it;
+    }
+    // Nothing exactly under the pointer: allow a few pixels of slack so thin or tiny
+    // countries (Gambia, Sao Tome ...) can still be clicked.
+    const slack = 5 / k;
+    hitCtx.lineWidth = slack * 2;
+    let near = null,
+      nearSize = Infinity;
+    for (const it of poolItems) {
+      if (!it.hi) continue;
+      const b = it.bb;
+      if (mx < b[0] - slack || mx > b[2] + slack || my < b[1] - slack || my > b[3] + slack) continue;
+      if (it.size < nearSize && hitCtx.isPointInStroke(it.hi, mx, my)) {
+        near = it;
+        nearSize = it.size;
+      }
+    }
+    return near;
   }
 
   // ---------- game ----------
@@ -318,51 +592,62 @@
     };
     setScreen("play");
     buildMap(); // re-fit with room for the HUD
-    say(null);
     updateHud();
   }
 
-  function pick(id) {
-    if (screen !== "play" || game.busy) return;
-    const it = items.get(id);
-    if (!it || !it.pool) return;
+  function pick(it) {
+    if (screen !== "play" || game.busy || !it || !it.pool) return;
     const level = levelOf(settings.level);
-    if (level.fill && game.results.has(id)) {
-      say("Already filled in", "bad", 800);
+    if (level.fill && game.results.has(it.c.id)) {
+      // already filled in: its label shakes, no penalty
+      it.shake = { t0: performance.now(), dur: 450 };
+      touch(it);
+      request(false);
       return;
     }
-    if (id === targetId()) onCorrect(id);
-    else onWrong(id);
+    if (it.c.id === targetId()) onCorrect(it);
+    else onWrong(it);
   }
 
-  function onCorrect(id) {
-    game.results.set(id, { ok: true, tries: game.tries - game.left + 1 });
-    if (game.left === game.tries) game.firstTry++;
+  function onCorrect(it) {
+    const tries = game.tries - game.left + 1;
+    game.results.set(it.c.id, { ok: true, tries });
+    if (tries === 1) game.firstTry++;
+    if (!levelOf(settings.level).fill) {
+      // nothing fills in on Hard/Expert, so give a brief glow to confirm
+      it.flash = { color: resultColor({ ok: true, tries }), t0: performance.now(), dur: 700 };
+      touch(it);
+    }
     applyState();
-    say("✓ " + items.get(id).c.name, "good", 600);
     next();
   }
 
-  function onWrong(id) {
+  function onWrong(it) {
     game.wrong++;
     game.left--;
-    flash(id, "wrong", 650);
-    if (game.left <= 0) {
-      miss(false);
-    } else {
-      say(`Not ${items.get(id).c.name} · ${game.left} ${game.left === 1 ? "guess" : "guesses"} left`, "bad", 1300);
+    const now = performance.now();
+    // The label under the cursor does not change. The clicked country shows its own name and shakes.
+    it.flash = { color: colors.wrong, t0: now, dur: 700 };
+    it.tmp = { until: now + 1200, kind: "wrong" };
+    it.shake = { t0: now, dur: 600 };
+    touch(it);
+    if (game.left <= 0) miss(false);
+    else {
       updateHud();
+      request(false);
     }
   }
 
   function miss(skipped) {
-    const id = targetId();
-    game.results.set(id, { ok: false, skipped });
+    const it = items.get(targetId());
+    game.results.set(it.c.id, { ok: false, skipped });
     game.busy = true;
+    const now = performance.now();
+    it.pulse = { t0: now, dur: 1650 };
+    it.tmp = { until: now + 1800, kind: "reveal" };
+    pings.push({ id: it.c.id, t0: now });
+    touch(it);
     applyState();
-    flash(id, "reveal", 1700);
-    ping(id);
-    say(`It's ${items.get(id).c.name}, right here`, "bad", 1800);
     updateHud();
     setTimeout(() => {
       game.busy = false;
@@ -380,48 +665,41 @@
   function finish() {
     game.t1 = performance.now();
     clearInterval(timer);
-    setTimeout(() => {
-      if (screen !== "play") return;
-      showEnd();
-    }, 700);
     game.busy = true;
+    setTimeout(() => {
+      if (screen === "play") showEnd();
+    }, 700);
   }
 
-  // ---------- pill under the cursor + HUD ----------
-  let pillTimer = null;
-  let pillBusy = false; // a temporary message is showing
-  function say(text, kind, ms) {
-    clearTimeout(pillTimer);
-    pillBusy = !!(text && ms);
-    pillEl.className = kind || "";
-    if (text) {
-      pillEl.innerHTML = `<b></b>`;
-      pillEl.firstChild.textContent = text;
-      if (ms) pillTimer = setTimeout(() => say(null), ms);
-    } else if (game && game.i < game.queue.length) {
+  // ---------- label under the cursor + HUD ----------
+  let pillW = 80;
+  function setPill() {
+    if (game && game.i < game.queue.length) {
       pillEl.innerHTML = `<span class="k">Find</span><b></b>`;
       pillEl.querySelector("b").textContent = targetName();
-    } else {
-      pillEl.innerHTML = "";
-    }
+      pillW = pillEl.offsetWidth; // measured once per country, not on every mouse move
+    } else pillEl.innerHTML = "";
   }
   const fmt = (ms) => {
     const t = Math.floor(ms / 1000);
     return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
   };
   let timer = null;
+  let shownTarget = -1;
   function updateHud() {
     if (!game) return;
     const total = game.queue.length;
     const ok = [...game.results.values()].filter((r) => r.ok).length;
-    const miss = game.results.size - ok;
     $("#st-ok").textContent = ok;
-    $("#st-miss").textContent = miss;
+    $("#st-miss").textContent = game.results.size - ok;
     $("#st-prog").textContent = `${Math.min(game.i + 1, total)} / ${total}`;
     if (game.i < total) {
-      $("#target-name").textContent = targetName();
       $("#pips").innerHTML = Array.from({ length: game.tries }, (_, i) => `<i class="${i < game.left ? "" : "off"}"></i>`).join("");
-      if (!pillBusy) say(null);
+      if (shownTarget !== game.i) {
+        shownTarget = game.i;
+        $("#target-name").textContent = targetName();
+        setPill();
+      }
     }
     clearInterval(timer);
     timer = setInterval(() => {
@@ -464,11 +742,13 @@
     mg.innerHTML = "";
     for (const m of MODES) {
       const n = poolFor(m.id, "all").length;
-      mg.appendChild(opt(m.name, `${n} countries`, settings.mode === m.id, () => {
-        settings.mode = m.id;
-        if (!poolFor(settings.mode, settings.size).length) settings.size = "all";
-        changed(true);
-      }));
+      mg.appendChild(
+        opt(m.name, `${n} countries`, settings.mode === m.id, () => {
+          settings.mode = m.id;
+          if (!poolFor(settings.mode, settings.size).length) settings.size = "all";
+          changed(true);
+        }),
+      );
     }
     const sg = $("#size-seg");
     sg.innerHTML = "";
@@ -488,10 +768,12 @@
     const lg = $("#level-grid");
     lg.innerHTML = "";
     for (const l of LEVELS) {
-      lg.appendChild(opt(l.name, l.desc, settings.level === l.id, () => {
-        settings.level = l.id;
-        changed(false);
-      }));
+      lg.appendChild(
+        opt(l.name, l.desc, settings.level === l.id, () => {
+          settings.level = l.id;
+          changed(false);
+        }),
+      );
     }
     const n = poolFor(settings.mode, settings.size).length;
     $("#start-count").textContent = `· ${n} ${n === 1 ? "country" : "countries"}`;
@@ -514,48 +796,72 @@
   }
 
   // ---------- input ----------
-  svg.on("click", (ev) => {
-    const el = ev.target.closest && ev.target.closest("[data-id]");
-    if (el) pick(el.getAttribute("data-id"));
+  topCv.addEventListener("click", (ev) => {
+    if (screen !== "play") return;
+    const r = topCv.getBoundingClientRect();
+    pick(hit(ev.clientX - r.left, ev.clientY - r.top));
   });
 
+  function moveCursor() {
+    if (!ptr) return;
+    if (screen === "play" && ptr.type !== "touch") {
+      cursorEl.hidden = false;
+      // keep the label on screen near the edges
+      const half = pillW / 2 + 8;
+      const lx = Math.max(half, Math.min(stageRect.width - half, ptr.x)) - ptr.x;
+      pillEl.style.transform = `translateX(calc(-50% + ${lx}px))`;
+      cursorEl.style.transform = `translate3d(${ptr.x}px,${ptr.y}px,0)`;
+      const h = hit(ptr.x, ptr.y);
+      if (h !== hover) {
+        hover = h;
+        dirtyTop = true;
+        if (!raf) raf = requestAnimationFrame(frame);
+      }
+    }
+  }
   stage.addEventListener("pointermove", (ev) => {
     if (screen !== "play" || ev.pointerType === "touch") return;
-    const r = stage.getBoundingClientRect();
-    const x = ev.clientX - r.left,
-      y = ev.clientY - r.top;
-    cursorEl.hidden = false;
-    // keep the label on screen near the edges
-    const half = pillEl.offsetWidth / 2 + 8;
-    const lx = Math.max(half, Math.min(r.width - half, x)) - x;
-    pillEl.style.left = lx + "px";
-    cursorEl.style.transform = `translate(${x}px,${y}px)`;
+    ptr = { x: ev.clientX - stageRect.left, y: ev.clientY - stageRect.top, type: ev.pointerType };
+    ptrDirty = true;
+    if (!raf) raf = requestAnimationFrame(frame);
   });
-  stage.addEventListener("pointerleave", () => (cursorEl.hidden = true));
-  // Hide the crosshair over the HUD buttons, where a normal pointer is needed.
+  stage.addEventListener("pointerleave", () => {
+    cursorEl.hidden = true;
+    if (hover) {
+      hover = null;
+      request(false);
+    }
+  });
+  // Hide the label over the HUD buttons.
   for (const sel of ["#hud > *", "#hud-bottom > *"]) {
     document.querySelectorAll(sel).forEach((el) => {
       el.addEventListener("pointerenter", () => (cursorEl.hidden = true));
     });
   }
 
-  const zoomBy = (f) => svg.transition().duration(220).call(zoomBehavior.scaleBy, f);
+  const zoomBy = (f) => d3.select(topCv).transition().duration(220).call(zoomBehavior.scaleBy, f);
   $("#z-in").onclick = () => zoomBy(1.7);
   $("#z-out").onclick = () => zoomBy(1 / 1.7);
-  $("#z-reset").onclick = () => svg.transition().duration(300).call(zoomBehavior.transform, d3.zoomIdentity);
+  $("#z-reset").onclick = () => d3.select(topCv).transition().duration(300).call(zoomBehavior.transform, d3.zoomIdentity);
 
   function toMenu() {
     clearInterval(timer);
     game = null;
+    shownTarget = -1;
     setScreen("menu");
-    say(null);
     buildMap();
     renderMenu();
   }
   $("#btn-menu").onclick = toMenu;
   $("#e-menu").onclick = toMenu;
-  $("#btn-start").onclick = startGame;
-  $("#e-again").onclick = startGame;
+  $("#btn-start").onclick = () => {
+    shownTarget = -1;
+    startGame();
+  };
+  $("#e-again").onclick = () => {
+    shownTarget = -1;
+    startGame();
+  };
   $("#e-map").onclick = () => {
     setScreen("review");
     applyState();
@@ -571,6 +877,8 @@
     try {
       localStorage.setItem("worldz-theme", dark ? "dark" : "light");
     } catch (e) {}
+    readColors();
+    request(true);
   }
   $("#btn-theme").onclick = toggleTheme;
   $("#m-theme").onclick = toggleTheme;
@@ -580,8 +888,13 @@
   const reqFs = root.requestFullscreen || root.webkitRequestFullscreen;
   function toggleFs() {
     if (!reqFs) return;
-    if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
-    else reqFs.call(root);
+    try {
+      if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      else {
+        const r = reqFs.call(root);
+        if (r && r.catch) r.catch(() => {});
+      }
+    } catch (e) {}
   }
   if (!reqFs) for (const b of ["#btn-fs", "#m-fs"]) $(b).hidden = true;
   $("#btn-fs").onclick = toggleFs;
@@ -598,12 +911,53 @@
   new ResizeObserver(() => {
     clearTimeout(rt);
     rt = setTimeout(() => {
-      const r = stage.getBoundingClientRect();
+      const r = topCv.getBoundingClientRect();
+      stageRect = { left: r.left, top: r.top, width: r.width, height: r.height };
       if (Math.abs(r.width - W) > 1 || Math.abs(r.height - H) > 1) buildMap();
     }, 120);
   }).observe(stage);
 
+  // Test hook, only present when the page is opened with #debug.
+  if (location.hash === "#debug") {
+    window.__worldz = {
+      // client coordinates of a point that really hits the country
+      screenPoint(id) {
+        const it = items.get(id);
+        if (!it) return null;
+        const k = transform.k;
+        const tryPt = (x, y) => (hit(x, y) === it ? [x + stageRect.left, y + stageRect.top] : null);
+        let r = tryPt(it.ax * k + transform.x, it.ay * k + transform.y);
+        if (r || !it.bb) return r;
+        for (let a = 0; a <= 20 && !r; a++) for (let b = 0; b <= 20 && !r; b++) r = tryPt((it.bb[0] + ((it.bb[2] - it.bb[0]) * a) / 20) * k + transform.x, (it.bb[1] + ((it.bb[3] - it.bb[1]) * b) / 20) * k + transform.y);
+        return r;
+      },
+      target: () => (game ? targetId() : null),
+      // average ms to draw one full frame (map + overlay) at zoom k, in software rendering
+      bench(k, n = 40) {
+        const save = transform;
+        transform = d3.zoomIdentity.translate(W / 2 - (W / 2) * k, H / 2 - (H / 2) * k).scale(k);
+        const t0 = performance.now();
+        for (let i = 0; i < n; i++) {
+          drawBase();
+          drawTop(performance.now());
+          bctx.getImageData(0, 0, 1, 1); // force each frame to really render
+          tctx.getImageData(0, 0, 1, 1);
+        }
+        const ms = (performance.now() - t0) / n;
+        transform = save;
+        request(true);
+        return ms;
+      },
+      hitAt(cx, cy) {
+        const r = topCv.getBoundingClientRect();
+        const h = hit(cx - r.left, cy - r.top);
+        return h ? h.c.id : null;
+      },
+    };
+  }
+
   // ---------- go ----------
+  readColors();
   renderMenu();
   buildMap();
 })();

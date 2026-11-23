@@ -6,10 +6,12 @@
     <title>worldz</title>
     <meta name="description" content="Click the country you're asked for. World and continent maps, small or big countries, four difficulty levels." />
     <script>
-      // Set the theme before first paint (same approach as Pebblez).
+      // Night mode is the default. Set the theme before first paint (same approach as Pebblez).
+      var light = false;
       try {
-        if (localStorage.getItem("worldz-theme") === "dark") document.documentElement.classList.add("dark");
+        light = localStorage.getItem("worldz-theme") === "light";
       } catch (e) {}
+      if (!light) document.documentElement.classList.add("dark");
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -18,14 +20,11 @@
   </head>
   <body>
     <main id="stage" data-screen="menu">
-      <svg id="map" role="img" aria-label="World map"></svg>
+      <canvas id="base" aria-hidden="true"></canvas>
+      <canvas id="top" role="img" aria-label="World map"></canvas>
 
-      <!-- Crosshair cursor with the country to find printed just beneath it -->
+      <!-- The country to find, printed just beneath the mouse pointer -->
       <div id="cursor" hidden>
-        <svg class="plus" viewBox="-14 -14 28 28" width="28" height="28" aria-hidden="true">
-          <path d="M-11 0H11M0 -11V11" class="halo" />
-          <path d="M-11 0H11M0 -11V11" class="core" />
-        </svg>
         <div id="pill"></div>
       </div>
 

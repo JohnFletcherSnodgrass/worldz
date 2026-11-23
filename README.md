@@ -2,7 +2,7 @@
 
 A country guessing game. You're given a country, you click it on the map.
 
-Same look as [Pebblez](https://github.com/JohnFletcherSnodgrass/pebblez): warm paper ground, coral, sun yellow, navy ink, Caveat handwriting, light and dark.
+Same look as [Pebblez](https://github.com/JohnFletcherSnodgrass/pebblez): coral, sun yellow, navy ink, Caveat handwriting. Night mode is the default (near-black map, orange country outlines); light mode is one tap away.
 
 ## Play
 
@@ -23,8 +23,11 @@ npm start        # python3 -m http.server 8080, then open http://localhost:8080
   | Medium | yes | 1 |
   | Hard   | no  | 3 |
   | Expert | no  | 1 |
-- The crosshair cursor has the country to find printed under it. Press **F** (or the button) for full screen, **S** to skip, scroll or pinch to zoom, drag to pan.
+- The country to find is printed in a small orange label under the mouse pointer. Press **F** (or the button) for full screen, **S** to skip, scroll or pinch to zoom, drag to pan. The map can't be dragged past its own edge.
+- A right answer lights up in yooperlite orange: brightest on the first guess, darker on the second, darkest on the third.
+- A wrong guess leaves the label under the pointer alone. The country you clicked shows its name and shakes.
 - Countries too small to see at the current zoom show as clickable dots; zoom in and they turn into their real outline.
+- The map is drawn on a canvas (not SVG) to stay smooth. If frames come out slow it lowers its drawing resolution automatically.
 - Only countries in the chosen map and size are clickable; the rest of the map is shown dimmed for context.
 
 ## Data (all real, nothing drawn by hand)
