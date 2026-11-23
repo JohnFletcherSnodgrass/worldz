@@ -21,7 +21,7 @@ const byName = new Map(geoms.map((g) => [g.properties.name, g]));
 // EDITORIAL: independent states, plus Taiwan, Palestine and Kosovo, which most map quizzes include.
 const extra = new Set(["TWN", "PSE"]);
 const countries = wc.filter((c) => c.independent || extra.has(c.cca3));
-countries.push({ cca3: "XKX", ccn3: undefined, name: { common: "Kosovo" }, region: "Europe", subregion: "Southeast Europe", latlng: [42.667, 21.167], area: 10887, _atlasName: "Kosovo" });
+countries.push({ cca3: "XKX", ccn3: undefined, name: { common: "Kosovo" }, region: "Europe", subregion: "Southeast Europe", latlng: [42.667, 21.167], area: 10887, flag: "\u{1F1FD}\u{1F1F0}", _atlasName: "Kosovo" });
 
 // EDITORIAL: pieces of a country that the atlas draws separately.
 const mergeIn = { SOM: ["Somaliland"], CYP: ["N. Cyprus"] };
@@ -63,6 +63,7 @@ function continentsOf(c) {
 
 const out = { countries: [], context: [] };
 const used = new Set();
+const ownerOf = new Map(); // atlas geometry -> game country id (for borders)
 const problems = [];
 
 for (const c of countries) {
@@ -70,7 +71,10 @@ for (const c of countries) {
   parts.push(...(mergeIn[c.cca3] || []).map((n) => byName.get(n)));
   let geometry = null;
   if (parts.length) {
-    parts.forEach((p) => used.add(p));
+    parts.forEach((p) => {
+      used.add(p);
+      ownerOf.set(p, c.cca3);
+    });
     geometry = parts.length > 1 ? topojson.merge(topo, parts) : topojson.feature(topo, parts[0]).geometry;
     geometry = roundGeometry(geometry);
   }
@@ -83,6 +87,8 @@ for (const c of countries) {
     id: c.cca3,
     name: c.name.common,
     continents: continentsOf(c),
+    subregion: c.subregion || c.region,
+    flag: c.flag || "",
     area: Math.round(area),
     latlng: c.latlng,
     geometry,
@@ -95,6 +101,22 @@ for (const g of geoms) {
   out.context.push({ name: g.properties.name, geometry: roundGeometry(topojson.feature(topo, g).geometry) });
 }
 
+// Land borders, from the shapes that share an edge in the atlas topology.
+const nb = topojson.neighbors(geoms);
+const borders = new Map();
+geoms.forEach((g, i) => {
+  const a = ownerOf.get(g);
+  if (!a) return;
+  for (const j of nb[i]) {
+    const b = ownerOf.get(geoms[j]);
+    if (b && b !== a) {
+      if (!borders.has(a)) borders.set(a, new Set());
+      borders.get(a).add(b);
+    }
+  }
+});
+for (const c of out.countries) c.neighbors = [...(borders.get(c.id) || [])].sort();
+
 out.countries.sort((a, b) => a.name.localeCompare(b.name));
 fs.writeFileSync("data/world-data.js", "window.WORLDZ_DATA = " + JSON.stringify(out) + ";\n");
 
@@ -105,4 +127,7 @@ console.log("area sanity warnings:", problems.length ? problems : "none");
 for (const k of ["Africa", "Asia", "Europe", "North America", "South America", "Oceania"])
   console.log(k, out.countries.filter((c) => c.continents.includes(k)).length);
 console.log("small(<100k km2):", out.countries.filter((c) => c.area < 100000).length, "big:", out.countries.filter((c) => c.area >= 100000).length);
+const byIdOut = new Map(out.countries.map((c) => [c.id, c]));
+for (const id of ["FRA", "BRA", "CHE", "MDG", "SOM", "CYP"]) console.log("borders", id, byIdOut.get(id).neighbors.join(" "));
+console.log("countries with no land border:", out.countries.filter((c) => !c.neighbors.length).length);
 console.log("no continent:", out.countries.filter((c) => !c.continents.length).map((c) => c.name));

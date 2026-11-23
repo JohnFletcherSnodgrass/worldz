@@ -41,9 +41,10 @@
         </div>
         <div class="hud-right">
           <button class="chip-btn" id="btn-skip" title="Skip this country (S)">Skip</button>
-          <button class="icon-btn" id="btn-dots" aria-pressed="true" title="Dots for small countries (D)" aria-label="Dots for small countries">
-            <svg viewBox="0 0 24 24"><circle cx="6" cy="12" r="2.2" /><circle cx="12" cy="7" r="2.2" /><circle cx="17" cy="15" r="2.2" /><path class="slash" d="M4 20L20 4" /></svg>
-          </button>
+          <details class="hints-dd hud" id="g-hints">
+            <summary class="chip-btn">Hints <span class="hd-n"></span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg></summary>
+            <div class="hints-panel"></div>
+          </details>
           <button class="icon-btn" id="btn-theme" title="Light / dark" aria-label="Toggle light or dark theme">
             <svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z" /></svg>
           </button>
@@ -58,6 +59,7 @@
           <span class="stat" title="Found"><i class="dot good"></i><b id="st-ok">0</b></span>
           <span class="stat" title="Missed"><i class="dot bad"></i><b id="st-miss">0</b></span>
           <span class="stat" id="st-prog">0 / 0</span>
+          <span class="stat" id="st-streak" title="Right answers in a row">Streak <b id="st-streak-n">0</b></span>
           <span class="stat" id="st-time">0:00</span>
         </div>
         <div class="zoom-ctl">
@@ -92,15 +94,18 @@
           <div class="section">
             <h2>Countries <small id="size-note"></small></h2>
             <div class="seg" id="size-seg" role="radiogroup"></div>
-            <button class="switch-row" id="m-dots" role="switch" aria-checked="true">
-              <span><b>Dots for small countries</b><small>Tiny countries show as a dot you can click until you zoom in</small></span>
-              <i class="switch" aria-hidden="true"></i>
-            </button>
           </div>
 
           <div class="section">
             <h2>Difficulty</h2>
             <div class="grid levels" id="level-grid"></div>
+          </div>
+
+          <div class="section">
+            <details class="hints-dd" id="m-hints">
+              <summary><span class="hd-t">Hints</span><span class="hd-n"></span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg></summary>
+              <div class="hints-panel"></div>
+            </details>
           </div>
 
           <button class="go" id="btn-start">Start <span id="start-count"></span></button>
@@ -116,9 +121,11 @@
             <p class="end-sub" id="end-sub"></p>
           </div>
           <div class="end-stats" id="end-stats"></div>
+          <p class="end-best" id="end-best"></p>
           <div class="section" id="end-missed-wrap">
             <h2>Missed</h2>
             <div class="chips" id="end-missed"></div>
+            <button class="chip-btn practice" id="e-practice">Practice these</button>
           </div>
           <div class="end-actions">
             <button class="go" id="e-again">Play again</button>

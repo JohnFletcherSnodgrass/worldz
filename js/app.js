@@ -47,13 +47,35 @@
   const cursorEl = $("#cursor");
   const pillEl = $("#pill");
 
+  // Everything in the Hints dropdown. Each one can be switched on or off.
+  const HINTS = [
+    { group: "Help while you play" },
+    { id: "arrow", t: "Direction arrow", s: "After a wrong guess, an arrow points toward the answer and shows how far off you were (3-guess levels)." },
+    { id: "neighbours", t: "Neighbour outline", s: "On your last guess, outlines the countries that border the answer. Islands have none (3-guess levels)." },
+    { id: "fly", t: "Fly to the answer", s: "When you miss, the map zooms to the country, then back." },
+    { id: "retry", t: "Missed countries come back", s: "They're asked again later in the round. Your score keeps the first try." },
+    { id: "tints", t: "Region tints", s: "A faint colour per region, like West Africa or the Caribbean." },
+    { id: "dots", t: "Dots for small countries", s: "Tiny countries show as a clickable dot until you zoom in. Key: D." },
+    { group: "Extras" },
+    { id: "streak", t: "Streak and best scores", s: "Your streak while playing, and your best score and time on each map." },
+    { id: "pop", t: "Pop when you get one right", s: "" },
+    { id: "grain", t: "Paper grain", s: "A light paper texture on the map." },
+    { id: "flags", t: "Flags on the results screen", s: "" },
+  ];
+  const HINT_DEFAULTS = { arrow: true, neighbours: true, fly: true, retry: false, tints: false, dots: true, streak: true, pop: true, grain: true, flags: true };
+
   // ---------- settings (remembered, but the app works without storage) ----------
-  const DEFAULTS = { mode: "world", size: "all", level: "easy", dots: true };
-  let settings = { ...DEFAULTS };
+  const DEFAULTS = { mode: "world", size: "all", level: "easy" };
+  let settings = { ...DEFAULTS, hints: { ...HINT_DEFAULTS } };
   try {
     const saved = JSON.parse(localStorage.getItem("worldz-settings") || "null");
-    if (saved && MODES.some((m) => m.id === saved.mode) && SIZES.some((s) => s.id === saved.size) && LEVELS.some((l) => l.id === saved.level)) settings = { ...DEFAULTS, ...saved, dots: saved.dots !== false };
+    if (saved && MODES.some((m) => m.id === saved.mode) && SIZES.some((s) => s.id === saved.size) && LEVELS.some((l) => l.id === saved.level)) {
+      const hints = { ...HINT_DEFAULTS, ...(saved.hints || {}) };
+      if (saved.dots === false) hints.dots = false; // older saved setting
+      settings = { mode: saved.mode, size: saved.size, level: saved.level, hints };
+    }
   } catch (e) {}
+  const hint = (id) => !!settings.hints[id];
   const saveSettings = () => {
     try {
       localStorage.setItem("worldz-settings", JSON.stringify(settings));
@@ -79,6 +101,20 @@
   }
   const polysOf = (g) => (g.type === "Polygon" ? [g.coordinates] : g.coordinates);
 
+  // Real-world centre of each country's main landmass, for "how far off" distances.
+  const geoAnchor = new Map();
+  for (const c of D.countries) {
+    if (c.geometry) {
+      const big = polysOf(c.geometry).reduce((a, p) => (polyInfo(p).area > polyInfo(a).area ? p : a));
+      geoAnchor.set(c.id, d3.geoCentroid(polyInfo(big).poly));
+    } else geoAnchor.set(c.id, [c.latlng[1], c.latlng[0]]);
+  }
+  const distanceKm = (a, b) => d3.geoDistance(geoAnchor.get(a), geoAnchor.get(b)) * R;
+
+  // One soft colour per sub-region (from the country list), for the region tints.
+  const TINTS = ["#ff5e3a", "#4e6bff", "#2e9e72", "#e2b100", "#7a5cff", "#14a3b8", "#d6447f", "#b0492e", "#8fbf3a", "#c77dff"];
+  const regionTint = new Map([...new Set(D.countries.map((c) => c.subregion))].sort().map((r, i) => [r, TINTS[i % TINTS.length]]));
+
   // ---------- colours (read from the CSS tokens so light/dark and the Pebblez palette stay in one place) ----------
   let colors = {};
   function readColors() {
@@ -98,6 +134,8 @@
       dot: g("--dot"),
       dotHover: g("--foreground"),
       tint: g("--hover-tint"),
+      coral: g("--coral"),
+      dark: document.documentElement.classList.contains("dark"),
     };
   }
   const resultColor = (r) => (r.ok ? colors["t" + Math.min(3, r.tries)] : colors.missed);
@@ -342,6 +380,7 @@
     bctx.lineWidth = 0.8 / k; // constant on-screen thickness
     bctx.strokeStyle = colors.stroke;
     const lo = k < LO_K;
+    const tints = hint("tints");
     for (const sh of ctxShapes) {
       if (!onScreen(sh.bb, k, 2)) continue;
       const p = lo ? sh.lo : sh.hi;
@@ -354,12 +393,18 @@
       const p = lo ? it.lo : it.hi;
       bctx.fillStyle = it.shown ? resultColor(it.shown) : colors.land; // every country the same colour until answered
       bctx.fill(p, "evenodd");
+      if (tints && !it.shown) {
+        bctx.globalAlpha = colors.dark ? 0.07 : 0.08;
+        bctx.fillStyle = regionTint.get(it.c.subregion);
+        bctx.fill(p, "evenodd");
+        bctx.globalAlpha = 1;
+      }
       bctx.stroke(p);
     }
   }
 
   // Countries with no outline at all (Tuvalu) are always a dot; others only when dots are switched on.
-  const isDot = (it, k) => it.dotCapable && (!it.hi || (settings.dots && it.size * k < DOT_PX));
+  const isDot = (it, k) => it.dotCapable && (!it.hi || (hint("dots") && it.size * k < DOT_PX));
 
   function drawTop(now) {
     const k = transform.k;
@@ -373,7 +418,39 @@
       tctx.fillStyle = colors.tint;
       tctx.fill(k < LO_K ? hover.lo : hover.hi, "evenodd");
     }
+    // neighbour outline on the last guess
+    if (hint("neighbours") && screen === "play" && game && !game.busy && game.tries > 1 && game.left === 1 && game.i < game.queue.length) {
+      const t = items.get(targetId());
+      tctx.lineWidth = 2 / k;
+      tctx.lineJoin = "round";
+      for (const nid of t.c.neighbors) {
+        const n = items.get(nid);
+        if (!n || !n.hi) continue;
+        const p = k < LO_K ? n.lo : n.hi;
+        tctx.fillStyle = "rgb(255 94 58 / 16%)";
+        tctx.fill(p, "evenodd");
+        tctx.strokeStyle = colors.coral;
+        tctx.stroke(p);
+      }
+    }
     for (const it of active) {
+      if (it.pop) {
+        const e = now - it.pop.t0;
+        if (e > 380) it.pop = null;
+        else if (it.hi) {
+          anim = true;
+          const sc = 1 + 0.16 * Math.sin((Math.PI * e) / 380);
+          tctx.save();
+          tctx.translate(it.ax, it.ay);
+          tctx.scale(sc, sc);
+          tctx.translate(-it.ax, -it.ay);
+          tctx.shadowColor = "rgb(0 0 0 / 35%)";
+          tctx.shadowBlur = 10;
+          tctx.fillStyle = it.pop.color;
+          tctx.fill(k < LO_K ? it.lo : it.hi, "evenodd");
+          tctx.restore();
+        } else anim = true;
+      }
       if (it.flash) {
         const a = 1 - (now - it.flash.t0) / it.flash.dur;
         if (a <= 0) it.flash = null;
@@ -412,8 +489,16 @@
       if (it.shown) col = resultColor(it.shown);
       if (it.flash) col = it.flash.color;
       if (it.pulse && Math.sin(((now - it.pulse.t0) / 550) * Math.PI) > 0) col = colors.accent;
+      let r = 3.4;
+      if (it.pop) {
+        const e = now - it.pop.t0;
+        if (e < 380) {
+          r *= 1 + 0.8 * Math.sin((Math.PI * e) / 380);
+          col = it.pop.color;
+        }
+      }
       tctx.beginPath();
-      tctx.arc(x, y, 3.4, 0, 6.2832);
+      tctx.arc(x, y, r, 0, 6.2832);
       tctx.fillStyle = col;
       tctx.fill();
       tctx.lineWidth = 1;
@@ -469,6 +554,7 @@
         const it = items.get(p.id);
         if (!it) continue;
         anim = true;
+        if (now < p.t0) continue; // starts after the fly-in
         const ph = ((now - p.t0) % 900) / 900;
         tctx.globalAlpha = 1 - ph;
         tctx.beginPath();
@@ -478,9 +564,90 @@
       tctx.globalAlpha = 1;
     }
 
+    // direction arrow after a wrong guess
+    if (game && game.arrow && hint("arrow") && screen === "play") {
+      const A = game.arrow;
+      const e = now - A.t0;
+      if (e > 2700) game.arrow = null;
+      else {
+        anim = true;
+        const f = items.get(A.from),
+          t = items.get(A.to);
+        tctx.globalAlpha = e < 2200 ? 1 : 1 - (e - 2200) / 500;
+        drawArrow(f.ax * k + transform.x, f.ay * k + transform.y, t.ax * k + transform.x, t.ay * k + transform.y, A.km);
+        tctx.globalAlpha = 1;
+      }
+    }
+
     // forget items whose effects ended
-    for (const it of active) if (!it.flash && !it.pulse && !it.shake && !(it.tmp && it.tmp.until > now)) active.delete(it);
+    for (const it of active) if (!it.flash && !it.pulse && !it.shake && !it.pop && !(it.tmp && it.tmp.until > now)) active.delete(it);
     return anim || active.size > 0;
+  }
+
+  const kmText = (km) => (km < 50 ? "next door" : Math.round(km / 10) * 10 + " km").replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  function arrowHead(x, y, ux, uy, size) {
+    tctx.beginPath();
+    tctx.moveTo(x + ux * size, y + uy * size);
+    tctx.lineTo(x - ux * size * 0.3 - uy * size * 0.8, y - uy * size * 0.3 + ux * size * 0.8);
+    tctx.lineTo(x - ux * size * 0.3 + uy * size * 0.8, y - uy * size * 0.3 - ux * size * 0.8);
+    tctx.closePath();
+  }
+  // Arrow from the country you clicked toward the answer, with the distance at its tip.
+  // If the answer is off screen, a marker on the screen edge points to it as well.
+  function drawArrow(fx, fy, tx, ty, km) {
+    const dx = tx - fx,
+      dy = ty - fy,
+      d = Math.hypot(dx, dy) || 1;
+    const ux = dx / d,
+      uy = dy / d;
+    const len = Math.max(26, Math.min(80, d - 18));
+    const sx = fx + ux * 8,
+      sy = fy + uy * 8,
+      ex = sx + ux * len,
+      ey = sy + uy * len;
+    tctx.lineCap = "round";
+    for (const [w, c] of [
+      [7.5, "rgb(10 10 10 / 55%)"],
+      [3.5, colors.coral],
+    ]) {
+      tctx.lineWidth = w;
+      tctx.strokeStyle = c;
+      tctx.beginPath();
+      tctx.moveTo(sx, sy);
+      tctx.lineTo(ex, ey);
+      tctx.stroke();
+      arrowHead(ex, ey, ux, uy, w > 4 ? 12 : 9.5);
+      tctx.fillStyle = c;
+      tctx.fill();
+    }
+    const label = kmText(km);
+    tctx.font = "700 12px " + FONT;
+    tctx.textAlign = "center";
+    tctx.lineWidth = 3;
+    tctx.strokeStyle = "rgb(10 10 10 / 75%)";
+    const lx = ex + ux * 26,
+      ly = ey + uy * 26 + 4;
+    tctx.strokeText(label, lx, ly);
+    tctx.fillStyle = "#fff";
+    tctx.fillText(label, lx, ly);
+    // edge marker when the answer is off screen
+    const m = 26;
+    if (tx < m || tx > W - m || ty < m || ty > H - m) {
+      const cx = W / 2,
+        cy = H / 2;
+      const vx = tx - cx,
+        vy = ty - cy;
+      const s = Math.min(vx ? (vx > 0 ? W - m - cx : m - cx) / vx : Infinity, vy ? (vy > 0 ? H - m - cy : m - cy) / vy : Infinity);
+      const px = cx + vx * s,
+        py = cy + vy * s,
+        vl = Math.hypot(vx, vy) || 1;
+      arrowHead(px, py, vx / vl, vy / vl, 14);
+      tctx.fillStyle = "rgb(10 10 10 / 55%)";
+      tctx.fill();
+      arrowHead(px, py, vx / vl, vy / vl, 11);
+      tctx.fillStyle = colors.coral;
+      tctx.fill();
+    }
   }
 
   // Paint results (fill + labels) onto the map.
@@ -489,7 +656,9 @@
     const reveal = screen === "end" || screen === "review";
     for (const it of poolItems) {
       const r = game && game.results.get(it.c.id);
-      it.shown = r && (level.fill || reveal) ? r : null;
+      // a missed country that will be asked again stays blank until then
+      const waiting = game && !reveal && game.pendingRetry.has(it.c.id);
+      it.shown = r && !waiting && (level.fill || reveal) ? r : null;
       it.labelOn = !!it.shown;
     }
     request(true);
@@ -562,12 +731,21 @@
     if (s !== "play") cursorEl.hidden = true;
   }
 
-  function startGame() {
-    const pool = poolFor(settings.mode, settings.size);
+  // ids: play just these countries (practice); otherwise the whole map
+  function startGame(ids) {
+    const pool = ids || poolFor(settings.mode, settings.size).map((c) => c.id);
     if (!pool.length) return;
     const level = levelOf(settings.level);
+    shownTarget = -1;
     game = {
-      queue: shuffle(pool.map((c) => c.id)),
+      queue: shuffle(pool.slice()),
+      total: pool.length,
+      practice: !!ids,
+      pendingRetry: new Set(), // missed, will be asked again
+      retried: new Set(),
+      streak: 0,
+      bestStreak: 0,
+      arrow: null,
       i: 0,
       tries: level.tries,
       left: level.tries,
@@ -586,7 +764,7 @@
   function pick(it) {
     if (screen !== "play" || game.busy || !it || !it.pool) return;
     const level = levelOf(settings.level);
-    if (level.fill && game.results.has(it.c.id)) {
+    if (level.fill && game.results.has(it.c.id) && !game.pendingRetry.has(it.c.id)) {
       // already filled in: its label shakes, no penalty
       it.shake = { t0: performance.now(), dur: 450 };
       touch(it);
@@ -598,12 +776,26 @@
   }
 
   function onCorrect(it) {
+    const id = it.c.id;
     const tries = game.tries - game.left + 1;
-    game.results.set(it.c.id, { ok: true, tries });
-    if (tries === 1) game.firstTry++;
-    if (!levelOf(settings.level).fill) {
+    const isRetry = game.pendingRetry.has(id);
+    if (isRetry) game.pendingRetry.delete(id); // score keeps the first try
+    else {
+      game.results.set(id, { ok: true, tries });
+      if (tries === 1) game.firstTry++;
+    }
+    game.streak++;
+    game.bestStreak = Math.max(game.bestStreak, game.streak);
+    game.arrow = null;
+    const col = isRetry ? colors.t1 : resultColor({ ok: true, tries });
+    const now = performance.now();
+    if (!levelOf(settings.level).fill || isRetry) {
       // nothing fills in on Hard/Expert, so give a brief glow to confirm
-      it.flash = { color: resultColor({ ok: true, tries }), t0: performance.now(), dur: 700 };
+      it.flash = { color: col, t0: now, dur: 700 };
+      touch(it);
+    }
+    if (hint("pop")) {
+      it.pop = { t0: now, color: col };
       touch(it);
     }
     applyState();
@@ -619,6 +811,7 @@
     it.tmp = { until: now + 1200, kind: "wrong" };
     it.shake = { t0: now, dur: 600 };
     touch(it);
+    if (game.left > 0) game.arrow = { from: it.c.id, to: targetId(), t0: now, km: distanceKm(it.c.id, targetId()) };
     if (game.left <= 0) miss(false);
     else {
       updateHud();
@@ -628,22 +821,59 @@
 
   function miss(skipped) {
     const it = items.get(targetId());
-    game.results.set(it.c.id, { ok: false, skipped });
+    const id = it.c.id;
+    if (game.pendingRetry.has(id)) game.pendingRetry.delete(id);
+    else game.results.set(id, { ok: false, skipped });
     game.busy = true;
+    game.streak = 0;
+    game.arrow = null;
+    let requeue = null;
+    if (hint("retry") && !game.retried.has(id)) {
+      game.retried.add(id);
+      requeue = id;
+    }
     const now = performance.now();
-    it.pulse = { t0: now, dur: 1650 };
-    it.tmp = { until: now + 1800, kind: "reveal" };
-    pings.push({ id: it.c.id, t0: now });
+    const back = hint("fly") ? flyTo(it) : null;
+    const hold = back ? 2700 : 1800;
+    const lead = back ? 650 : 0; // let the map arrive first
+    it.pulse = { t0: now + lead, dur: hold - lead - 150 };
+    it.tmp = { until: now + hold, kind: "reveal" };
+    pings.push({ id, t0: now + lead });
     touch(it);
     applyState();
     updateHud();
+    const g = game;
+    if (back) setTimeout(() => game === g && d3.select(topCv).transition("fly").duration(550).call(zoomBehavior.transform, back), hold - 560);
     setTimeout(() => {
+      if (game !== g) return; // left this round meanwhile
       game.busy = false;
+      if (requeue) {
+        // ask it again a few countries later
+        game.queue.splice(Math.min(game.queue.length, game.i + 5), 0, requeue);
+        game.pendingRetry.add(requeue);
+        applyState();
+      }
       next();
-    }, 1800);
+    }, hold);
+  }
+
+  // Zoom to a country for the reveal. Returns where to fly back to, or null if it's already in view.
+  function flyTo(it) {
+    const k0 = transform.k;
+    const kMin = zoomBehavior.scaleExtent()[0];
+    const k2 = Math.max(kMin, Math.min(5, (Math.min(W, H) * 0.3) / Math.max(it.size, 2))); // capped so you still see the surroundings
+    const x = it.ax * k0 + transform.x,
+      y = it.ay * k0 + transform.y;
+    const inView = it.bb ? onScreen(it.bb, k0, -40) && it.bb[0] * k0 + transform.x > 40 && it.bb[2] * k0 + transform.x < W - 40 && it.bb[1] * k0 + transform.y > 40 && it.bb[3] * k0 + transform.y < H - 40 : x > 40 && x < W - 40 && y > 40 && y < H - 40;
+    if (inView && k0 >= k2 * 0.6) return null;
+    const back = transform;
+    const t = d3.zoomIdentity.translate(W / 2 - it.ax * k2, H / 2 - it.ay * k2).scale(k2);
+    d3.select(topCv).transition("fly").duration(650).call(zoomBehavior.transform, t);
+    return back;
   }
 
   function next() {
+    game.arrow = null;
     game.i++;
     if (game.i >= game.queue.length) return finish();
     game.left = game.tries;
@@ -678,6 +908,7 @@
     if (!game) return;
     const total = game.queue.length;
     const ok = [...game.results.values()].filter((r) => r.ok).length;
+    $("#st-streak-n").textContent = game.streak;
     $("#st-ok").textContent = ok;
     $("#st-miss").textContent = game.results.size - ok;
     $("#st-prog").textContent = `${Math.min(game.i + 1, total)} / ${total}`;
@@ -697,29 +928,59 @@
   }
 
   // ---------- end screen ----------
+  let lastMissed = [];
+  function readBest() {
+    try {
+      return JSON.parse(localStorage.getItem("worldz-best") || "{}") || {};
+    } catch (e) {
+      return {};
+    }
+  }
   function showEnd() {
-    const total = game.queue.length;
+    const total = game.total;
     const ok = [...game.results.values()].filter((r) => r.ok).length;
-    const missed = game.queue.filter((id) => !game.results.get(id).ok).map((id) => items.get(id).c.name);
+    const ids = [...new Set(game.queue)];
+    lastMissed = ids.filter((id) => !game.results.get(id).ok);
+    const missed = lastMissed.map((id) => items.get(id).c).sort((a, b) => a.name.localeCompare(b.name));
     const pct = Math.round((ok / total) * 100);
+    const time = game.t1 - game.t0;
+    // best score per map (found first, then time), kept in this browser
+    let bestLine = "",
+      newBest = false;
+    if (!game.practice) {
+      const key = `${settings.mode}|${settings.size}|${settings.level}`;
+      const all = readBest();
+      const prev = all[key];
+      newBest = !prev || ok > prev.found || (ok === prev.found && time < prev.time);
+      if (newBest) {
+        all[key] = { found: ok, total, time };
+        try {
+          localStorage.setItem("worldz-best", JSON.stringify(all));
+        } catch (e) {}
+      }
+      bestLine = newBest ? (prev ? `<b>New best on this map.</b> Previous: ${prev.found} / ${prev.total} in ${fmt(prev.time)}.` : "<b>First score on this map.</b>") : `Best on this map: <b>${prev.found} / ${prev.total} in ${fmt(prev.time)}</b>.`;
+    }
+    if (hint("streak")) bestLine += ` Longest streak: <b>${game.bestStreak}</b>.`;
+    $("#end-best").innerHTML = hint("streak") ? bestLine.trim() : "";
     $("#end-score").textContent = `${ok} / ${total}`;
-    $("#end-hand").textContent = pct === 100 ? "flawless!" : pct >= 80 ? "great run" : pct >= 50 ? "not bad at all" : "keep exploring";
-    $("#end-sub").textContent = `${modeOf(settings.mode).name} · ${SIZES.find((s) => s.id === settings.size).name} countries · ${levelOf(settings.level).name}`;
+    $("#end-hand").textContent = hint("streak") && newBest && ok > 0 ? "new best!" : pct === 100 ? "flawless!" : pct >= 80 ? "great run" : pct >= 50 ? "not bad at all" : "keep exploring";
+    $("#end-sub").textContent = `${game.practice ? "Practice · " : ""}${modeOf(settings.mode).name} · ${SIZES.find((s) => s.id === settings.size).name} countries · ${levelOf(settings.level).name}`;
     $("#end-stats").innerHTML = [
       [pct + "%", "found"],
       [Math.round((game.firstTry / total) * 100) + "%", "first try"],
-      [fmt(game.t1 - game.t0), "time"],
+      [fmt(time), "time"],
     ]
       .map(([b, s]) => `<div><b>${b}</b><span>${s}</span></div>`)
       .join("");
     $("#end-missed-wrap").hidden = !missed.length;
     const chips = $("#end-missed");
     chips.textContent = "";
-    for (const name of missed.sort()) {
+    for (const c of missed) {
       const s = document.createElement("span");
-      s.textContent = name;
+      s.textContent = (hint("flags") && c.flag ? c.flag + " " : "") + c.name;
       chips.appendChild(s);
     }
+    $("#e-practice").textContent = `Practice ${missed.length === 1 ? "this one" : "these " + missed.length}`;
     setScreen("end");
     applyState();
   }
@@ -785,6 +1046,10 @@
 
   // ---------- input ----------
   topCv.addEventListener("click", (ev) => {
+    if (swallowClick) {
+      swallowClick = false;
+      return;
+    }
     if (screen !== "play") return;
     const r = topCv.getBoundingClientRect();
     pick(hit(ev.clientX - r.left, ev.clientY - r.top));
@@ -809,6 +1074,12 @@
   }
   stage.addEventListener("pointermove", (ev) => {
     if (screen !== "play" || ev.pointerType === "touch") return;
+    // only over the map itself, not over the buttons or the Hints panel
+    if (ev.target !== topCv) {
+      cursorEl.hidden = true;
+      ptr = null;
+      return;
+    }
     ptr = { x: ev.clientX - stageRect.left, y: ev.clientY - stageRect.top, type: ev.pointerType };
     ptrDirty = true;
     if (!raf) raf = requestAnimationFrame(frame);
@@ -820,12 +1091,6 @@
       request(false);
     }
   });
-  // Hide the label over the HUD buttons.
-  for (const sel of ["#hud > *", "#hud-bottom > *"]) {
-    document.querySelectorAll(sel).forEach((el) => {
-      el.addEventListener("pointerenter", () => (cursorEl.hidden = true));
-    });
-  }
 
   const zoomBy = (f) => d3.select(topCv).transition().duration(220).call(zoomBehavior.scaleBy, f);
   $("#z-in").onclick = () => zoomBy(1.7);
@@ -842,14 +1107,9 @@
   }
   $("#btn-menu").onclick = toMenu;
   $("#e-menu").onclick = toMenu;
-  $("#btn-start").onclick = () => {
-    shownTarget = -1;
-    startGame();
-  };
-  $("#e-again").onclick = () => {
-    shownTarget = -1;
-    startGame();
-  };
+  $("#btn-start").onclick = () => startGame();
+  $("#e-again").onclick = () => startGame();
+  $("#e-practice").onclick = () => startGame(lastMissed.slice());
   $("#e-map").onclick = () => {
     setScreen("review");
     applyState();
@@ -859,21 +1119,64 @@
     if (screen === "play" && !game.busy) miss(true);
   };
 
-  // dots for small countries
-  function renderDots() {
-    $("#btn-dots").setAttribute("aria-pressed", String(settings.dots));
-    $("#m-dots").setAttribute("aria-checked", String(settings.dots));
+  // ---------- Hints dropdown (same switches in the menu and in the game) ----------
+  const hintPanels = [$("#m-hints"), $("#g-hints")];
+  function buildHintPanels() {
+    for (const dd of hintPanels) {
+      const panel = dd.querySelector(".hints-panel");
+      panel.textContent = "";
+      for (const h of HINTS) {
+        if (h.group) {
+          const g = document.createElement("h3");
+          g.textContent = h.group;
+          panel.appendChild(g);
+          continue;
+        }
+        const b = document.createElement("button");
+        b.className = "switch-row";
+        b.setAttribute("role", "switch");
+        b.dataset.hint = h.id;
+        b.innerHTML = `<span><b></b><small></small></span><i class="switch" aria-hidden="true"></i>`;
+        b.querySelector("b").textContent = h.t;
+        b.querySelector("small").textContent = h.s;
+        b.onclick = () => setHint(h.id, !hint(h.id));
+        panel.appendChild(b);
+      }
+    }
+    renderHints();
   }
-  function toggleDots() {
-    settings.dots = !settings.dots;
+  function renderHints() {
+    const on = HINTS.filter((h) => h.id && hint(h.id)).length;
+    const total = HINTS.filter((h) => h.id).length;
+    for (const dd of hintPanels) {
+      dd.querySelector(".hd-n").textContent = `${on} of ${total} on`;
+      dd.querySelectorAll("[data-hint]").forEach((b) => b.setAttribute("aria-checked", String(hint(b.dataset.hint))));
+    }
+    stage.classList.toggle("grain", hint("grain"));
+    $("#st-streak").hidden = !hint("streak");
+  }
+  function setHint(id, on) {
+    settings.hints[id] = on;
     saveSettings();
-    renderDots();
+    renderHints();
     hover = null;
     request(true);
   }
-  $("#btn-dots").onclick = toggleDots;
-  $("#m-dots").onclick = toggleDots;
-  renderDots();
+  const toggleDots = () => setHint("dots", !hint("dots"));
+  buildHintPanels();
+  // Close the in-game dropdown when you click elsewhere (and don't count that click as a guess).
+  let swallowClick = false;
+  document.addEventListener(
+    "pointerdown",
+    (ev) => {
+      const dd = $("#g-hints");
+      if (dd.open && !dd.contains(ev.target)) {
+        dd.open = false;
+        if (ev.target === topCv) swallowClick = true;
+      }
+    },
+    true,
+  );
 
   // theme
   function toggleTheme() {
@@ -930,7 +1233,7 @@
         const it = items.get(id);
         if (!it) return null;
         const k = transform.k;
-        const tryPt = (x, y) => (hit(x, y) === it ? [x + stageRect.left, y + stageRect.top] : null);
+        const tryPt = (x, y) => (x > 2 && y > 2 && x < W - 2 && y < H - 2 && hit(x, y) === it ? [x + stageRect.left, y + stageRect.top] : null);
         let r = tryPt(it.ax * k + transform.x, it.ay * k + transform.y);
         if (r || !it.bb) return r;
         for (let a = 0; a <= 20 && !r; a++) for (let b = 0; b <= 20 && !r; b++) r = tryPt((it.bb[0] + ((it.bb[2] - it.bb[0]) * a) / 20) * k + transform.x, (it.bb[1] + ((it.bb[3] - it.bb[1]) * b) / 20) * k + transform.y);
