@@ -24,11 +24,11 @@ npm start        # python3 -m http.server 8080, then open http://localhost:8080
   | Hard   | no  | 3 |
   | Expert | no  | 1 |
 - The country to find is printed in a small orange label under the mouse pointer. Press **F** (or the button) for full screen, **S** to skip, scroll or pinch to zoom, drag to pan. The map can't be dragged past its own edge.
-- A right answer lights up in yooperlite orange: brightest on the first guess, darker on the second, darkest on the third.
+- A right answer turns green: brightest on the first guess, darker on the second, darkest on the third. Missed countries turn red.
 - A wrong guess leaves the label under the pointer alone. The country you clicked shows its name and shakes.
 - Countries too small to see at the current zoom show as clickable dots; zoom in and they turn into their real outline. Turn the dots off with the dots button, the switch in the menu, or the **D** key (Tuvalu has no outline in the map data, so it always stays a dot).
 - The map is drawn on a canvas (not SVG) to stay smooth. If frames come out slow it lowers its drawing resolution automatically.
-- Only countries in the chosen map and size are clickable; the rest of the map is shown dimmed for context.
+- On a continent map you start locked on that continent, but you can zoom out and pan around the whole world. Only countries in the chosen map and size are clickable.
 
 ## Data (all real, nothing drawn by hand)
 

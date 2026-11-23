@@ -79,24 +79,6 @@
   }
   const polysOf = (g) => (g.type === "Polygon" ? [g.coordinates] : g.coordinates);
 
-  // Drop far-flung overseas bits of a country (e.g. French Guiana on the Europe map)
-  // while always keeping big landmasses (Russia, Greenland ...).
-  function crop(geom, mode) {
-    if (mode.id === "world") return geom;
-    const [w, s, e, n] = mode.box;
-    const cx = (w + e) / 2;
-    const hw = (e - w) / 2 + 15;
-    const keep = polysOf(geom).filter((p) => {
-      const info = polyInfo(p);
-      if (info.area > 400000) return true;
-      if (!info.centroid) info.centroid = d3.geoCentroid(info.poly);
-      const [lo, la] = info.centroid;
-      const dl = ((((lo - cx + 540) % 360) + 360) % 360) - 180;
-      return Math.abs(dl) <= hw && la >= s - 15 && la <= n + 15;
-    });
-    return keep.length ? { type: "MultiPolygon", coordinates: keep } : null;
-  }
-
   // ---------- colours (read from the CSS tokens so light/dark and the Pebblez palette stay in one place) ----------
   let colors = {};
   function readColors() {
@@ -107,9 +89,9 @@
       ctx: g("--land-ctx"),
       stroke: g("--land-stroke"),
       ocean: g("--ocean"),
-      t1: g("--yooper-1"),
-      t2: g("--yooper-2"),
-      t3: g("--yooper-3"),
+      t1: g("--good-1"),
+      t2: g("--good-2"),
+      t3: g("--good-3"),
       missed: g("--bad"),
       wrong: g("--destructive"),
       accent: g("--accent"),
@@ -130,7 +112,7 @@
   let items = new Map(); // country id -> item
   let poolItems = []; // clickable countries
   let dotItems = []; // pool countries that can show as a dot
-  let ctxShapes = []; // territories etc, drawn dim and not clickable
+  let ctxShapes = []; // territories etc, not clickable
   const active = new Set(); // items with a running flash / label / shake
   let pings = []; // { id, t0 }
   let stageRect = { left: 0, top: 0, width: 0, height: 0 };
@@ -229,8 +211,14 @@
     const hiPath = d3.geoPath(proj).digits(2);
     const loPath = lowRes(proj, 0.5);
     const bounds = d3.geoPath(proj);
-    // The map's own outline: panning is not allowed past it.
-    const outlineBox = bounds.bounds(outline);
+    // You start locked on the chosen map, but can zoom out and pan over the whole world.
+    // Panning stops at the world's own outline (Antarctica isn't drawn, so the bottom edge stops at 58°S).
+    const cx = (w + e) / 2;
+    const worldPts = [];
+    for (let i = 0; i <= 72; i++) for (const y of [-58, 85]) worldPts.push([cx - 179.9 + (359.8 * i) / 72, y]);
+    for (let y = -58; y <= 85; y += 11) for (const x of [cx - 179.9, cx + 179.9]) worldPts.push([x, y]);
+    const outlineBox = bounds.bounds({ type: "MultiPoint", coordinates: worldPts });
+    const kMin = Math.min(1, (W - 32) / (outlineBox[1][0] - outlineBox[0][0]), (H - top - bottom) / (outlineBox[1][1] - outlineBox[0][1]));
 
     const pool = new Set(poolFor(settings.mode, settings.size).map((c) => c.id));
 
@@ -243,13 +231,12 @@
 
     // Territories and non-country shapes: context only.
     for (const x of D.context) {
-      const g = crop(x.geometry, mode);
-      const sh = g && mkShape({ type: "Feature", geometry: g });
+      const sh = mkShape({ type: "Feature", geometry: x.geometry });
       if (sh) ctxShapes.push(sh);
     }
 
     for (const c of D.countries) {
-      const g = c.geometry ? crop(c.geometry, mode) : null;
+      const g = c.geometry;
       const it = { c, hi: null, lo: null, bb: null, ax: 0, ay: 0, size: 0, lw: 0, pool: pool.has(c.id), dotCapable: false, shown: null, labelOn: false, flash: null, pulse: null, tmp: null, shake: null };
       let ok = false;
       if (g) {
@@ -285,12 +272,12 @@
 
     zoomBehavior = d3
       .zoom()
-      .scaleExtent([1, 80])
+      .scaleExtent([kMin, 80])
       .extent([
         [0, 0],
         [W, H],
       ])
-      // Can't be dragged past the edge of the map: the pan limit is the map's own outline.
+      // Can't be dragged past the edge of the world map.
       .translateExtent([
         [outlineBox[0][0], outlineBox[0][1]],
         [outlineBox[1][0], outlineBox[1][1]],
@@ -358,14 +345,14 @@
     for (const sh of ctxShapes) {
       if (!onScreen(sh.bb, k, 2)) continue;
       const p = lo ? sh.lo : sh.hi;
-      bctx.fillStyle = colors.ctx;
+      bctx.fillStyle = colors.land;
       bctx.fill(p, "evenodd");
       bctx.stroke(p);
     }
     for (const it of items.values()) {
       if (!it.hi || !onScreen(it.bb, k, 2)) continue;
       const p = lo ? it.lo : it.hi;
-      bctx.fillStyle = it.pool ? (it.shown ? resultColor(it.shown) : colors.land) : colors.ctx;
+      bctx.fillStyle = it.shown ? resultColor(it.shown) : colors.land; // every country the same colour until answered
       bctx.fill(p, "evenodd");
       bctx.stroke(p);
     }

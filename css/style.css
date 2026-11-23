@@ -30,10 +30,10 @@
   --land-hover: #c4bfae;
   --land-ctx: #e5e1d6;
   --land-stroke: #f6f4ef;
-  /* yooperlite: glowing orange when you get it first try, darker the more guesses it took */
-  --yooper-1: #ff9f1c;
-  --yooper-2: #dd7010;
-  --yooper-3: #93420b;
+  /* right answers: green, darker the more guesses it took */
+  --good-1: #2e9e72;
+  --good-2: #22785a;
+  --good-3: #175640;
   --bad: #d13a30;
   --hover-tint: rgb(26 31 43 / 11%);
   --cursor-core: #1a1f2b;
@@ -60,9 +60,9 @@
   --land-hover: #4d4b44;
   --land-ctx: #2c2b28;
   --land-stroke: #1f1e1c;
-  --yooper-1: #ffa621;
-  --yooper-2: #de7512;
-  --yooper-3: #8f4409;
+  --good-1: #4fb383;
+  --good-2: #398d66;
+  --good-3: #266a4b;
   --bad: #e5534b;
   --hover-tint: rgb(255 255 255 / 11%);
   --cursor-core: #ede9e0;
@@ -340,7 +340,7 @@ html:-webkit-full-screen #stage {
   border-radius: 50%;
 }
 .dot.good {
-  background: var(--yooper-1);
+  background: var(--good-1);
 }
 .dot.bad {
   background: var(--bad);
