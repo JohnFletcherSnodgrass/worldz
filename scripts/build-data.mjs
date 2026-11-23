@@ -1,5 +1,5 @@
-// Builds data/world-data.js from real datasets:
-//   - world-atlas (Natural Earth 1:50m country outlines, public domain)
+// Builds data/world-data.js and data/world-hi.js from real datasets:
+//   - world-atlas (Natural Earth 1:50m country outlines, public domain; plus 1:10m for zoomed-in views)
 //   - world-countries (country names, regions, coordinates; ODbL, from mledoze/countries)
 // Nothing about a country is typed in by hand except the editorial choices marked EDITORIAL.
 import fs from "node:fs";
@@ -121,6 +121,33 @@ out.countries.sort((a, b) => a.name.localeCompare(b.name));
 fs.writeFileSync("data/world-data.js", "window.WORLDZ_DATA = " + JSON.stringify(out) + ";\n");
 
 const noGeom = out.countries.filter((c) => !c.geometry).map((c) => c.name);
+// Detailed 1:10m outlines, loaded by the game in the background and drawn when zoomed in.
+// Shipped as the atlas topology itself (shared, quantised arcs keep it small); each game country
+// lists the shapes it is made of, and the browser merges them with topojson-client.
+const topoHi = require("world-atlas/countries-10m.json");
+const geomsHi = topoHi.objects.countries.geometries;
+const hiById = new Map();
+for (const g of geomsHi) if (g.id) hiById.set(g.id, [...(hiById.get(g.id) || []), g]);
+const hiByName = new Map(geomsHi.map((g) => [g.properties.name, g]));
+const hi = { countries: {}, context: [] };
+const usedHi = new Set();
+for (const c of countries) {
+  if (!out.countries.find((o) => o.id === c.cca3)?.geometry) continue; // the game only zooms into shapes it already has
+  const parts = (c._atlasName ? [hiByName.get(c._atlasName)] : hiById.get(c.ccn3) || []).concat((mergeIn[c.cca3] || []).map((n) => hiByName.get(n)));
+  if (parts.some((p) => !p)) problems.push(`${c.name.common}: missing 1:10m shape`);
+  const ok = parts.filter(Boolean);
+  if (!ok.length) continue;
+  ok.forEach((p) => usedHi.add(p));
+  hi.countries[c.cca3] = ok.map((p) => geomsHi.indexOf(p));
+}
+geomsHi.forEach((g, i) => {
+  if (!usedHi.has(g) && g.properties.name !== "Antarctica" && g.type) hi.context.push(i);
+});
+const slim = { type: "Topology", transform: topoHi.transform, arcs: topoHi.arcs, objects: { countries: { type: "GeometryCollection", geometries: geomsHi.map(({ type, arcs }) => (type ? { type, arcs } : { type: null })) } } };
+hi.topo = slim;
+fs.writeFileSync("data/world-hi.js", "window.WORLDZ_HI = " + JSON.stringify(hi) + ";\n");
+console.log(`1:10m: ${Object.keys(hi.countries).length} countries, ${hi.context.length} context shapes`);
+
 console.log(`countries: ${out.countries.length}, context shapes: ${out.context.length}`);
 console.log("no outline (drawn as dots):", noGeom.join(", ") || "none");
 console.log("area sanity warnings:", problems.length ? problems : "none");
