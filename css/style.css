@@ -27,6 +27,9 @@
 
   /* map: pale sea, four warm land shades so neighbours read apart, borders as gaps in a sea tone */
   --ocean: #cfdde2;
+  --space: #e9e6de;
+  --sea-hi: #e6f0f2;
+  --sea-lo: #b4c7ce;
   --land: #f3efe4;
   --land-2: #ebe5d6;
   --land-3: #e2dbc8;
@@ -60,6 +63,9 @@
   --shadow-hero: 0 22px 40px -22px rgb(255 94 58 / 45%);
 
   --ocean: #121722;
+  --space: #0b0b0d;
+  --sea-hi: #1f2840;
+  --sea-lo: #0a0d14;
   --land: #565349;
   --land-2: #4d4a41;
   --land-3: #605d52;
@@ -192,7 +198,19 @@ html:-webkit-full-screen #stage {
   pointer-events: none;
   z-index: 4;
 }
-#hud > * {
+/* Only the actual controls catch the mouse; the empty parts of the bar (and the "Find" card)
+   let clicks through to the map underneath. */
+#hud > *,
+#hud-bottom > *,
+.target-card,
+.stats,
+.stat,
+.hint {
+  pointer-events: none;
+}
+#hud button,
+#hud details,
+#hud-bottom button {
   pointer-events: auto;
 }
 .hud-left,
@@ -313,9 +331,7 @@ html:-webkit-full-screen #stage {
   pointer-events: none;
   z-index: 4;
 }
-#hud-bottom > * {
-  pointer-events: auto;
-}
+
 .stats {
   display: flex;
   gap: 6px;
@@ -822,3 +838,26 @@ html:-webkit-full-screen #stage {
   }
 }
 
+
+/* ---------- Globe ---------- */
+#sea {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: none;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle at 36% 30%, var(--sea-hi) 0%, var(--ocean) 48%, var(--sea-lo) 100%);
+  box-shadow: 0 0 0 1px var(--border), 0 30px 80px -30px rgb(0 0 0 / 55%);
+}
+#stage.globe {
+  background: var(--space);
+}
+#stage.globe #sea {
+  display: block;
+}
+#btn-view[aria-pressed="true"] {
+  background: var(--coral);
+  color: #fff;
+  border-color: transparent;
+}

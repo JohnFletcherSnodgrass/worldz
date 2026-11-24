@@ -14,7 +14,8 @@ npm start        # python3 -m http.server 8080, then open http://localhost:8080
 
 (Or open `index.html` directly; everything is local.)
 
-- **Map:** World, Africa, Asia, Europe, North America, South America, Oceania.
+- **Map:** World, or any mix of Africa, Asia, Europe, North America, South America and Oceania (pick as many as you like). You start on the chosen area but can roam the whole world.
+- **View:** a flat map (Miller projection, the default) or a globe you drag to spin. Switch in the menu, with the globe button in the game, or the **G** key.
 - **Countries:** All (default), Small (under 100,000 km²) or Big (100,000 km² and up).
 - **Difficulty:**
   | Level  | Found countries fill in + get labelled | Guesses per country |
@@ -23,7 +24,7 @@ npm start        # python3 -m http.server 8080, then open http://localhost:8080
   | Medium | yes | 1 |
   | Hard   | no  | 3 |
   | Expert | no  | 1 |
-- The country to find is printed in a small orange label under the mouse pointer. Press **F** (or the button) for full screen, **S** to skip, scroll or pinch to zoom, drag to pan. The map can't be dragged past its own edge.
+- The country to find is printed in a small orange label under the mouse pointer (switch it off under Hints). Press **F** (or the button) for full screen, **S** to skip, scroll or pinch to zoom, drag to pan (or spin, on the globe). The flat map can't be dragged past its own edge.
 - A right answer turns green: brightest on the first guess, darker on the second, darkest on the third. Missed countries turn red.
 - A wrong guess leaves the label under the pointer alone. The country you clicked shows its name and shakes.
 - Zoom in past about 4× and the map switches to detailed 1:10m outlines (coastlines, islands), loaded in the background when a round starts.
@@ -35,6 +36,7 @@ A **Hints** dropdown, in the menu and in the game's top bar, switches each of th
 
 | Hint | What it does | Default |
 | ---- | ------------ | :-----: |
+| Name under the pointer | The country to find follows your mouse; it is always shown at the top too | on |
 | Direction arrow | After a wrong guess, points from your click toward the answer and shows the distance (3-guess levels) | on |
 | Neighbour outline | On your last guess, outlines the countries that border the answer (3-guess levels) | on |
 | Fly to the answer | On a miss, zooms to the country, then back | on |

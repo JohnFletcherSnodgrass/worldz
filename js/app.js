@@ -51,6 +51,7 @@
   // Everything in the Hints dropdown. Each one can be switched on or off.
   const HINTS = [
     { group: "Help while you play" },
+    { id: "label", t: "Name under the pointer", s: "The country to find follows your mouse. It's always shown at the top as well." },
     { id: "arrow", t: "Direction arrow", s: "After a wrong guess, an arrow points toward the answer and shows how far off you were (3-guess levels)." },
     { id: "neighbours", t: "Neighbour outline", s: "On your last guess, outlines the countries that border the answer. Islands have none (3-guess levels)." },
     { id: "fly", t: "Fly to the answer", s: "When you miss, the map zooms to the country, then back." },
@@ -63,19 +64,23 @@
     { id: "grain", t: "Paper grain", s: "A light paper texture on the map." },
     { id: "flags", t: "Flags on the results screen", s: "" },
   ];
-  const HINT_DEFAULTS = { arrow: true, neighbours: true, fly: true, retry: false, tints: false, dots: true, streak: true, pop: true, grain: true, flags: true };
+  const HINT_DEFAULTS = { label: true, arrow: true, neighbours: true, fly: true, retry: false, tints: false, dots: true, streak: true, pop: true, grain: true, flags: true };
 
   // ---------- settings (remembered, but the app works without storage) ----------
-  const DEFAULTS = { mode: "world", size: "all", level: "easy" };
+  const CONTINENTS = MODES.filter((m) => m.id !== "world").map((m) => m.id);
+  const DEFAULTS = { continents: [...CONTINENTS], size: "all", level: "easy", view: "flat" };
   let settings = { ...DEFAULTS, hints: { ...HINT_DEFAULTS } };
   try {
     const saved = JSON.parse(localStorage.getItem("worldz-settings") || "null");
-    if (saved && MODES.some((m) => m.id === saved.mode) && SIZES.some((s) => s.id === saved.size) && LEVELS.some((l) => l.id === saved.level)) {
+    if (saved && SIZES.some((s) => s.id === saved.size) && LEVELS.some((l) => l.id === saved.level)) {
       const hints = { ...HINT_DEFAULTS, ...(saved.hints || {}) };
       if (saved.dots === false) hints.dots = false; // older saved setting
-      settings = { mode: saved.mode, size: saved.size, level: saved.level, hints };
+      let continents = Array.isArray(saved.continents) ? saved.continents.filter((c) => CONTINENTS.includes(c)) : saved.mode && saved.mode !== "world" && CONTINENTS.includes(saved.mode) ? [saved.mode] : [...CONTINENTS];
+      if (!continents.length) continents = [...CONTINENTS];
+      settings = { continents, size: saved.size, level: saved.level, view: saved.view === "globe" ? "globe" : "flat", hints };
     }
   } catch (e) {}
+  const isGlobe = () => settings.view === "globe";
   const hint = (id) => !!settings.hints[id];
   const saveSettings = () => {
     try {
@@ -86,9 +91,41 @@
   // ---------- data helpers ----------
   const modeOf = (id) => MODES.find((m) => m.id === id);
   const levelOf = (id) => LEVELS.find((l) => l.id === id);
-  const inMode = (c, mode) => mode.id === "world" || c.continents.includes(mode.id);
+  // A selection is any set of continents; all of them is "World".
+  const isWorld = (list) => list.length === CONTINENTS.length;
   const sizeOk = (c, size) => size === "all" || (size === "small" ? c.area < SMALL_KM2 : c.area >= SMALL_KM2);
-  const poolFor = (modeId, size) => D.countries.filter((c) => inMode(c, modeOf(modeId)) && sizeOk(c, size));
+  const poolFor = (list, size) => D.countries.filter((c) => (isWorld(list) || c.continents.some((x) => list.includes(x))) && sizeOk(c, size));
+  const selectionName = (list) => (isWorld(list) ? "World" : CONTINENTS.filter((c) => list.includes(c)).map((c) => modeOf(c).name).join(" + "));
+  const selectionKey = (list) => (isWorld(list) ? "world" : [...list].sort().join("+"));
+  // The area to start on: the smallest lon/lat box around every chosen continent.
+  function selectionBox(list) {
+    if (isWorld(list) || !list.length) return MODES[0].box;
+    if (list.length === 1) return modeOf(list[0]).box;
+    const covered = new Array(360).fill(false);
+    let s = 90,
+      n = -90;
+    for (const id of list) {
+      const [w, bs, e, bn] = modeOf(id).box;
+      s = Math.min(s, bs);
+      n = Math.max(n, bn);
+      for (let x = Math.floor(w); x < Math.ceil(e); x++) covered[(((x + 180) % 360) + 360) % 360] = true;
+    }
+    // the widest stretch of longitude nobody uses is where the map gets cut
+    let best = 0,
+      bestEnd = 0;
+    for (let i = 0; i < 720; i++) {
+      let len = 0;
+      while (len < 360 && !covered[(i + len) % 360]) len++;
+      if (len > best) {
+        best = len;
+        bestEnd = i + len;
+      }
+      i += len;
+    }
+    if (best < 40) return MODES[0].box; // the choice wraps almost all the way round
+    const start = (bestEnd % 360) - 180;
+    return [start, s, start + (360 - best), n];
+  }
 
   const polyCache = new WeakMap();
   function polyInfo(coords) {
@@ -315,6 +352,41 @@
     }
   }
 
+  const millerRaw = (l, p) => [l, 1.25 * Math.log(Math.tan(Math.PI / 4 + 0.4 * p))];
+  millerRaw.invert = (x, y) => [x, 2.5 * Math.atan(Math.exp(0.8 * y)) - 0.625 * Math.PI];
+
+  // ---------- globe ----------
+  let globeView = null, // { rot: [λ, φ], zoom } where you are now
+    globeSpawn = null, // where this map started (the reset button goes back here)
+    globeR = 200,
+    globeMoving = false;
+  const clampN = (v, a, b) => Math.max(a, Math.min(b, v));
+  function spawnGlobe(w, s, e, n) {
+    const cx = (w + e) / 2,
+      cy = clampN((s + n) / 2, -60, 60);
+    const world = e - w > 300;
+    let r = 0;
+    for (const p of [
+      [w, s],
+      [w, n],
+      [e, s],
+      [e, n],
+      [cx, s],
+      [cx, n],
+      [w, cy],
+      [e, cy],
+    ])
+      r = Math.max(r, d3.geoDistance([cx, cy], p));
+    const zoom = world ? 1 : clampN(0.95 / Math.sin(Math.min(r, Math.PI / 2)), 1, 6);
+    return { rot: [-cx, world ? -15 : -cy], zoom };
+  }
+  const sea = $("#sea");
+  function placeSea() {
+    const r = proj.scale();
+    sea.style.width = sea.style.height = 2 * r + "px";
+    sea.style.transform = `translate(${W / 2 - r}px, ${H / 2 - r}px)`;
+  }
+
   function buildMap() {
     const rect = topCv.getBoundingClientRect(); // the canvas sits inside the stage's 1px border
     stageRect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
@@ -329,22 +401,34 @@
     pings = [];
     hover = null;
 
-    const mode = modeOf(settings.mode);
-    const [w, s, e, n] = mode.box;
+    const [w, s, e, n] = selectionBox(settings.continents);
+    const globe = isGlobe();
+    stage.classList.toggle("globe", globe);
+    const zh = document.querySelector("#hud-bottom .hint");
+    if (zh) zh.textContent = globe ? "Scroll to zoom · drag to spin" : "Scroll to zoom · drag to pan";
     const pts = [];
     for (let x = w; x <= e; x += (e - w) / 24) for (const y of [s, n]) pts.push([x, y]);
     for (let y = s; y <= n; y += (n - s) / 12) for (const x of [w, e]) pts.push([x, y]);
     const outline = { type: "MultiPoint", coordinates: pts };
     const top = screen === "menu" ? 20 : 76;
     const bottom = top; // equal margins keep the map centred, so the pan limit matches its starting position
-    proj = d3.geoNaturalEarth1().rotate([-(w + e) / 2, 0]);
-    proj.fitExtent(
-      [
-        [16, top],
-        [W - 16, H - bottom],
-      ],
-      outline,
-    );
+    if (globe) {
+      // Globe: orthographic, centred on the chosen area. Dragging spins it (see "globe" below).
+      if (!globeView) globeView = globeSpawn = spawnGlobe(w, s, e, n);
+      globeR = Math.min(W - 32, H - top - bottom) / 2;
+      proj = d3.geoOrthographic().clipAngle(90).precision(0.2).rotate(globeView.rot).scale(globeR * globeView.zoom).translate([W / 2, H / 2]);
+      placeSea();
+    } else {
+      // Flat map: Miller cylindrical (a rectangle, like Mercator but less stretched near the poles).
+      proj = d3.geoProjection(millerRaw).rotate([-(w + e) / 2, 0]);
+      proj.fitExtent(
+        [
+          [16, top],
+          [W - 16, H - bottom],
+        ],
+        outline,
+      );
+    }
     const hiPath = d3.geoPath(proj).digits(2);
     hdPath = d3.geoPath(proj).digits(3);
     hdCtx = null;
@@ -359,7 +443,7 @@
     const outlineBox = bounds.bounds({ type: "MultiPoint", coordinates: worldPts });
     const kMin = Math.min(1, (W - 32) / (outlineBox[1][0] - outlineBox[0][0]), (H - top - bottom) / (outlineBox[1][1] - outlineBox[0][1]));
 
-    const pool = new Set(poolFor(settings.mode, settings.size).map((c) => c.id));
+    const pool = new Set(poolFor(settings.continents, settings.size).map((c) => c.id));
 
     const mkShape = (feat) => {
       const hiStr = hiPath(feat);
@@ -400,13 +484,15 @@
         }
       }
       if (!ok) {
-        // No outline (e.g. Tuvalu): place it from its listed coordinates.
-        const p = proj([c.latlng[1], c.latlng[0]]);
+        // No outline (e.g. Tuvalu, or anything on the far side of the globe): place it from its coordinates.
+        const ll = [c.latlng[1], c.latlng[0]];
+        const p = proj(ll);
         if (!p) continue;
         it.ax = p[0];
         it.ay = p[1];
+        if (globe && d3.geoDistance(ll, [-globeView.rot[0], -globeView.rot[1]]) > Math.PI / 2 - 0.02) it.hidden = true;
       }
-      it.dotCapable = it.pool && (!ok || it.size < DOT_PX * 6);
+      it.dotCapable = it.pool && !it.hidden && (!ok || it.size < DOT_PX * 6);
       items.set(c.id, it);
       if (it.pool) poolItems.push(it);
       if (it.dotCapable) dotItems.push(it);
@@ -441,10 +527,12 @@
       });
     const sel = d3.select(topCv);
     sel.on(".zoom", null);
-    sel.call(zoomBehavior).on("dblclick.zoom", null);
     transform = d3.zoomIdentity;
-    // d3 centres the map when it's smaller than the window; apply that starting position.
-    sel.call(zoomBehavior.transform, d3.zoomIdentity);
+    if (!globe) {
+      sel.call(zoomBehavior).on("dblclick.zoom", null);
+      // d3 centres the map when it's smaller than the window; apply that starting position.
+      sel.call(zoomBehavior.transform, d3.zoomIdentity);
+    }
     moving = false;
     glBuildMd();
     warmHd();
@@ -467,6 +555,7 @@
   function frame(now) {
     raf = 0;
     watchFrameRate(now || performance.now());
+    if (globeMoving) return; // the spinning globe draws its own quick picture
     if (ptrDirty) {
       ptrDirty = false;
       moveCursor();
@@ -938,7 +1027,7 @@
     for (const it of poolItems) {
       const tmp = it.tmp && it.tmp.until > now ? it.tmp : null;
       if (it.tmp && !tmp) it.tmp = null;
-      if (!it.labelOn && !tmp) continue;
+      if ((!it.labelOn && !tmp) || it.hidden) continue;
       let x = it.ax * k + transform.x,
         y = it.ay * k + transform.y;
       if (x < -80 || x > W + 80 || y < -30 || y > H + 30) continue;
@@ -1161,10 +1250,11 @@
   // ids: play just these countries (practice); otherwise the whole map
   function startGame(ids) {
     loadHd();
-    const pool = ids || poolFor(settings.mode, settings.size).map((c) => c.id);
+    const pool = ids || poolFor(settings.continents, settings.size).map((c) => c.id);
     if (!pool.length) return;
     const level = levelOf(settings.level);
     shownTarget = -1;
+    globeView = null;
     game = {
       queue: shuffle(pool.slice()),
       total: pool.length,
@@ -1271,7 +1361,7 @@
     applyState();
     updateHud();
     const g = game;
-    if (back) setTimeout(() => game === g && d3.select(topCv).transition("fly").duration(550).call(zoomBehavior.transform, back), hold - 560);
+    if (back) setTimeout(() => game === g && flyBack(back), hold - 560);
     setTimeout(() => {
       if (game !== g) return; // left this round meanwhile
       game.busy = false;
@@ -1287,6 +1377,7 @@
 
   // Zoom to a country for the reveal. Returns where to fly back to, or null if it's already in view.
   function flyTo(it) {
+    if (isGlobe()) return globeFlyTo(it);
     const k0 = transform.k;
     const kMin = zoomBehavior.scaleExtent()[0];
     const k2 = Math.max(kMin, Math.min(5, (Math.min(W, H) * 0.3) / Math.max(it.size, 2))); // capped so you still see the surroundings
@@ -1376,7 +1467,7 @@
     let bestLine = "",
       newBest = false;
     if (!game.practice) {
-      const key = `${settings.mode}|${settings.size}|${settings.level}`;
+      const key = `${selectionKey(settings.continents)}|${settings.size}|${settings.level}`;
       const all = readBest();
       const prev = all[key];
       newBest = !prev || ok > prev.found || (ok === prev.found && time < prev.time);
@@ -1392,7 +1483,7 @@
     $("#end-best").innerHTML = hint("streak") ? bestLine.trim() : "";
     $("#end-score").textContent = `${ok} / ${total}`;
     $("#end-hand").textContent = hint("streak") && newBest && ok > 0 ? "new best!" : pct === 100 ? "flawless!" : pct >= 80 ? "great run" : pct >= 50 ? "not bad at all" : "keep exploring";
-    $("#end-sub").textContent = `${game.practice ? "Practice · " : ""}${modeOf(settings.mode).name} · ${SIZES.find((s) => s.id === settings.size).name} countries · ${levelOf(settings.level).name}`;
+    $("#end-sub").textContent = `${game.practice ? "Practice · " : ""}${selectionName(settings.continents)} · ${SIZES.find((s) => s.id === settings.size).name} countries · ${levelOf(settings.level).name}`;
     $("#end-stats").innerHTML = [
       [pct + "%", "found"],
       [Math.round((game.firstTry / total) * 100) + "%", "first try"],
@@ -1417,20 +1508,53 @@
   function renderMenu() {
     const mg = $("#mode-grid");
     mg.innerHTML = "";
-    for (const m of MODES) {
-      const n = poolFor(m.id, "all").length;
-      mg.appendChild(
-        opt(m.name, `${n} countries`, settings.mode === m.id, () => {
-          settings.mode = m.id;
-          if (!poolFor(settings.mode, settings.size).length) settings.size = "all";
-          changed(true);
-        }),
-      );
+    const sel = settings.continents;
+    // "World" picks every continent; each continent toggles on its own (at least one stays on)
+    const all = opt("World", `${poolFor(CONTINENTS, "all").length} countries · everything`, isWorld(sel), () => {
+      settings.continents = [...CONTINENTS];
+      if (!poolFor(settings.continents, settings.size).length) settings.size = "all";
+      changed(true);
+    });
+    all.setAttribute("role", "button");
+    mg.appendChild(all);
+    for (const id of CONTINENTS) {
+      const n = poolFor([id], "all").length;
+      const on = sel.includes(id) && !isWorld(sel);
+      const b = opt(modeOf(id).name, `${n} countries`, on, () => {
+        let next;
+        if (isWorld(sel)) next = [id]; // from World, tapping a continent picks just that one
+        else if (sel.includes(id)) next = sel.filter((x) => x !== id);
+        else next = [...sel, id];
+        if (!next.length) return; // keep at least one
+        settings.continents = CONTINENTS.filter((c) => next.includes(c));
+        if (!poolFor(settings.continents, settings.size).length) settings.size = "all";
+        changed(true);
+      });
+      b.setAttribute("role", "checkbox");
+      mg.appendChild(b);
+    }
+    $("#mode-note").textContent = isWorld(sel) ? "" : sel.length > 1 ? `· ${selectionName(sel)}` : "· pick more to combine";
+    const vs = $("#view-seg");
+    vs.innerHTML = "";
+    for (const [v, name, sub] of [
+      ["flat", "Flat map", "pan and zoom"],
+      ["globe", "Globe", "drag to spin"],
+    ]) {
+      const b = document.createElement("button");
+      b.setAttribute("role", "radio");
+      b.dataset.view = v;
+      b.setAttribute("aria-checked", String(settings.view === v));
+      b.innerHTML = `${name}<small>${sub}</small>`;
+      b.onclick = () => {
+        setView(v);
+        renderMenu();
+      };
+      vs.appendChild(b);
     }
     const sg = $("#size-seg");
     sg.innerHTML = "";
     for (const s of SIZES) {
-      const n = poolFor(settings.mode, s.id).length;
+      const n = poolFor(settings.continents, s.id).length;
       const b = document.createElement("button");
       b.setAttribute("role", "radio");
       b.setAttribute("aria-checked", String(settings.size === s.id));
@@ -1452,7 +1576,7 @@
         }),
       );
     }
-    const n = poolFor(settings.mode, settings.size).length;
+    const n = poolFor(settings.continents, settings.size).length;
     $("#start-count").textContent = `· ${n} ${n === 1 ? "country" : "countries"}`;
   }
   function opt(title, sub, checked, onclick) {
@@ -1468,16 +1592,20 @@
   }
   function changed(rebuild) {
     saveSettings();
+    if (rebuild) globeView = null;
     renderMenu();
     if (rebuild && screen === "menu") buildMap();
   }
 
   // ---------- input ----------
+  let swallowClick = false,
+    dragEndedAt = -1e9;
   topCv.addEventListener("click", (ev) => {
     if (swallowClick) {
       swallowClick = false;
       return;
     }
+    if (performance.now() - dragEndedAt < 120) return;
     if (screen !== "play") return;
     const r = topCv.getBoundingClientRect();
     pick(hit(ev.clientX - r.left, ev.clientY - r.top));
@@ -1486,12 +1614,13 @@
   function moveCursor() {
     if (!ptr) return;
     if (screen === "play" && ptr.type !== "touch") {
-      cursorEl.hidden = false;
+      cursorEl.hidden = !hint("label");
       // keep the label on screen near the edges
       const half = pillW / 2 + 8;
       const lx = Math.max(half, Math.min(stageRect.width - half, ptr.x)) - ptr.x;
       pillEl.style.transform = `translateX(calc(-50% + ${lx}px))`;
       cursorEl.style.transform = `translate3d(${ptr.x}px,${ptr.y}px,0)`;
+      if (globeMoving) return;
       const h = hit(ptr.x, ptr.y);
       if (h !== hover) {
         hover = h;
@@ -1520,15 +1649,203 @@
     }
   });
 
-  const zoomBy = (f) => d3.select(topCv).transition().duration(220).call(zoomBehavior.scaleBy, f);
+  function flyBack(back) {
+    if (isGlobe()) animateGlobe(back, 550);
+    else d3.select(topCv).transition("fly").duration(550).call(zoomBehavior.transform, back);
+  }
+  const zoomBy = (f) => (isGlobe() ? animateGlobe({ rot: globeView.rot.slice(), zoom: clampN(globeView.zoom * f, 0.8, 40) }, 220) : d3.select(topCv).transition().duration(220).call(zoomBehavior.scaleBy, f));
   $("#z-in").onclick = () => zoomBy(1.7);
   $("#z-out").onclick = () => zoomBy(1 / 1.7);
-  $("#z-reset").onclick = () => d3.select(topCv).transition().duration(300).call(zoomBehavior.transform, d3.zoomIdentity);
+  $("#z-reset").onclick = () => (isGlobe() ? animateGlobe(globeSpawn, 400) : d3.select(topCv).transition().duration(300).call(zoomBehavior.transform, d3.zoomIdentity));
+
+  // ---------- globe: drag to spin, scroll to zoom ----------
+  // While it moves, a quick picture is drawn from lighter outlines; when it stops, the full map
+  // (detailed outlines, labels, dots, clicks) is rebuilt for the new angle.
+  let quickGeo = null;
+  function simplifyGeo(g, tol) {
+    const polys = (g.type === "Polygon" ? [g.coordinates] : g.coordinates)
+      .map((poly) =>
+        poly
+          .map((ring) => {
+            const out = [ring[0]];
+            for (let i = 1; i < ring.length - 1; i++) {
+              const a = out[out.length - 1],
+                b = ring[i];
+              if (Math.abs(b[0] - a[0]) + Math.abs(b[1] - a[1]) >= tol) out.push(b);
+            }
+            out.push(ring[ring.length - 1]);
+            return out;
+          })
+          .filter((r) => r.length >= 4),
+      )
+      .filter((p) => p.length);
+    return polys.length ? fixWinding({ type: "MultiPolygon", coordinates: polys }) : null;
+  }
+  function quickShapes() {
+    if (!quickGeo) {
+      quickGeo = [];
+      for (const x of D.context) {
+        const g = simplifyGeo(x.geometry, 0.3);
+        if (g) quickGeo.push({ id: null, f: { type: "Feature", geometry: g } });
+      }
+      for (const c of D.countries)
+        if (c.geometry) {
+          const g = simplifyGeo(c.geometry, 0.3);
+          if (g) quickGeo.push({ id: c.id, f: { type: "Feature", geometry: g } });
+        }
+    }
+    return quickGeo;
+  }
+  function globeQuick() {
+    globeMoving = true;
+    proj.rotate(globeView.rot).scale(globeR * globeView.zoom);
+    placeSea();
+    if (glCv) glCv.style.visibility = "hidden";
+    baseCv.style.display = "";
+    baseCv.style.transform = "";
+    bctx.setTransform(1, 0, 0, 1, 0, 0);
+    bctx.clearRect(0, 0, baseCv.width, baseCv.height);
+    tctx.setTransform(1, 0, 0, 1, 0, 0);
+    tctx.clearRect(0, 0, topCv.width, topCv.height);
+    bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    bctx.lineWidth = 0.8;
+    bctx.lineJoin = "round";
+    bctx.strokeStyle = colors.stroke;
+    const path = d3.geoPath(proj, bctx);
+    for (const q of quickShapes()) {
+      const it = q.id && items.get(q.id);
+      bctx.beginPath();
+      path(q.f);
+      bctx.fillStyle = !q.id ? colors.ctx : it && it.shown ? resultColor(it.shown) : colors.shades[shadeOf.get(q.id)];
+      bctx.fill("evenodd");
+      bctx.stroke();
+    }
+  }
+  let settleTimerG = 0;
+  function globeSettleSoon() {
+    clearTimeout(settleTimerG);
+    settleTimerG = setTimeout(globeSettle, 160);
+  }
+  // Rebuild the full map for the new angle, keeping any flashes / labels that are still running.
+  function globeSettle() {
+    clearTimeout(settleTimerG);
+    if (!isGlobe()) return;
+    const old = items,
+      keepPings = pings;
+    globeMoving = false;
+    buildMap();
+    for (const [id, it] of old) {
+      const nu = items.get(id);
+      if (!nu) continue;
+      let any = false;
+      for (const f of ["flash", "pulse", "tmp", "shake", "pop"])
+        if (it[f]) {
+          nu[f] = it[f];
+          any = true;
+        }
+      if (any) active.add(nu);
+    }
+    pings = keepPings;
+    if (glCv) glCv.style.visibility = "";
+    if (gl) baseCv.style.display = "none";
+    request(true);
+  }
+  let globeAnim = 0;
+  function animateGlobe(to, dur) {
+    if (!to) return;
+    cancelAnimationFrame(globeAnim);
+    const from = { rot: globeView.rot.slice(), zoom: globeView.zoom };
+    const dl = ((((to.rot[0] - from.rot[0] + 540) % 360) + 360) % 360) - 180; // the short way round
+    const t0 = performance.now();
+    const step = (now) => {
+      const e = Math.min(1, (now - t0) / dur),
+        q = d3.easeCubicInOut(e);
+      globeView = { rot: [from.rot[0] + dl * q, from.rot[1] + (to.rot[1] - from.rot[1]) * q], zoom: from.zoom * Math.pow(to.zoom / from.zoom, q) };
+      globeQuick();
+      if (e < 1) globeAnim = requestAnimationFrame(step);
+      else globeSettle();
+    };
+    globeAnim = requestAnimationFrame(step);
+  }
+  function globeFlyTo(it) {
+    const g = geoAnchor.get(it.c.id);
+    const centre = [-globeView.rot[0], -globeView.rot[1]];
+    if (!it.hidden && d3.geoDistance(g, centre) < 0.5 && it.size > 24) return null; // already in front of you
+    const back = { rot: globeView.rot.slice(), zoom: globeView.zoom };
+    const zoom = clampN(Math.max(globeView.zoom, it.c.area < 200000 ? 2.4 : 1.4), 1, 5);
+    animateGlobe({ rot: [-g[0], -clampN(g[1], -75, 75)], zoom }, 650);
+    return back;
+  }
+  let gDrag = null;
+  topCv.addEventListener("pointerdown", (ev) => {
+    if (!isGlobe() || ev.button) return;
+    cancelAnimationFrame(globeAnim);
+    gDrag = { x: ev.clientX, y: ev.clientY, rot: globeView.rot.slice(), moved: false, id: ev.pointerId };
+  });
+  topCv.addEventListener("pointermove", (ev) => {
+    if (!gDrag || ev.pointerId !== gDrag.id) return;
+    const dx = ev.clientX - gDrag.x,
+      dy = ev.clientY - gDrag.y;
+    if (!gDrag.moved && dx * dx + dy * dy < 16) return;
+    if (!gDrag.moved) {
+      gDrag.moved = true;
+      try {
+        topCv.setPointerCapture(ev.pointerId);
+      } catch (e) {}
+    }
+    const f = 180 / Math.PI / (globeR * globeView.zoom); // degrees per pixel at the globe's surface
+    globeView = { rot: [gDrag.rot[0] + dx * f, clampN(gDrag.rot[1] - dy * f, -80, 80)], zoom: globeView.zoom };
+    globeQuick();
+  });
+  const endDrag = () => {
+    if (!gDrag) return;
+    if (gDrag.moved) {
+      dragEndedAt = performance.now(); // a drag isn't a guess (the click it may produce is ignored)
+      globeSettleSoon();
+    }
+    gDrag = null;
+  };
+  topCv.addEventListener("pointerup", endDrag);
+  topCv.addEventListener("pointercancel", endDrag);
+  topCv.addEventListener(
+    "wheel",
+    (ev) => {
+      if (!isGlobe()) return;
+      ev.preventDefault();
+      cancelAnimationFrame(globeAnim);
+      globeView = { rot: globeView.rot.slice(), zoom: clampN(globeView.zoom * Math.exp(-ev.deltaY * 0.0015), 0.8, 40) };
+      globeQuick();
+      globeSettleSoon();
+    },
+    { passive: false },
+  );
+
+  // flat map or globe
+  function setView(v) {
+    if (settings.view === v) return;
+    settings.view = v;
+    saveSettings();
+    globeView = null;
+    cancelAnimationFrame(globeAnim);
+    globeMoving = false;
+    buildMap();
+    if (glCv) glCv.style.visibility = "";
+    if (gl) baseCv.style.display = "none";
+    renderView();
+  }
+  function renderView() {
+    const g = isGlobe();
+    $("#btn-view").setAttribute("aria-pressed", String(g));
+    $("#btn-view").title = g ? "Switch to the flat map (G)" : "Switch to the globe (G)";
+    document.querySelectorAll("#view-seg button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.view === settings.view)));
+  }
+  $("#btn-view").onclick = () => setView(isGlobe() ? "flat" : "globe");
 
   function toMenu() {
     clearInterval(timer);
     game = null;
     shownTarget = -1;
+    globeView = null;
     setScreen("menu");
     buildMap();
     renderMenu();
@@ -1581,6 +1898,7 @@
       dd.querySelectorAll("[data-hint]").forEach((b) => b.setAttribute("aria-checked", String(hint(b.dataset.hint))));
     }
     stage.classList.toggle("grain", hint("grain"));
+    if (!hint("label")) cursorEl.hidden = true;
     $("#st-streak").hidden = !hint("streak");
   }
   function setHint(id, on) {
@@ -1593,7 +1911,6 @@
   const toggleDots = () => setHint("dots", !hint("dots"));
   buildHintPanels();
   // Close the in-game dropdown when you click elsewhere (and don't count that click as a guess).
-  let swallowClick = false;
   document.addEventListener(
     "pointerdown",
     (ev) => {
@@ -1640,6 +1957,7 @@
     if (ev.key === "f" || ev.key === "F") toggleFs();
     else if ((ev.key === "s" || ev.key === "S") && screen === "play" && !game.busy) miss(true);
     else if (ev.key === "d" || ev.key === "D") toggleDots();
+    else if (ev.key === "g" || ev.key === "G") setView(isGlobe() ? "flat" : "globe");
   });
 
   // re-fit the map when the window (or full screen) changes size
@@ -1661,7 +1979,7 @@
         const it = items.get(id);
         if (!it) return null;
         const k = transform.k;
-        const tryPt = (x, y) => (x > 2 && y > 2 && x < W - 2 && y < H - 2 && hit(x, y) === it ? [x + stageRect.left, y + stageRect.top] : null);
+        const tryPt = (x, y) => (x > 2 && y > 2 && x < W - 2 && y < H - 2 && hit(x, y) === it && document.elementFromPoint(x + stageRect.left, y + stageRect.top) === topCv ? [x + stageRect.left, y + stageRect.top] : null);
         let r = tryPt(it.ax * k + transform.x, it.ay * k + transform.y);
         if (r || !it.bb) return r;
         for (let a = 0; a <= 20 && !r; a++) for (let b = 0; b <= 20 && !r; b++) r = tryPt((it.bb[0] + ((it.bb[2] - it.bb[0]) * a) / 20) * k + transform.x, (it.bb[1] + ((it.bb[3] - it.bb[1]) * b) / 20) * k + transform.y);
@@ -1692,6 +2010,7 @@
     };
   }
 
+  renderView();
   // ---------- go ----------
   initGL();
   readColors();
